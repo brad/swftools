@@ -151,6 +151,9 @@ typedef struct _SOUNDINFO
 #define FILEATTRIBUTE_USENETWORK 1
 #define FILEATTRIBUTE_AS3 8
 #define FILEATTRIBUTE_SYMBOLCLASS 16
+#define FILEATTRIBUTE_USEACCELERATEDBLIT 32
+#define FILEATTRIBUTE_USEHARDWAREGPU 64
+
 typedef struct _SWF
 { U8            fileVersion;
   U8		compressed;     // SWF or SWC?
@@ -228,6 +231,7 @@ U8    swf_GetU8(TAG * t);                   // resets Bitcount
 U16   swf_GetU16(TAG * t);
 #define swf_GetS16(tag)     ((S16)swf_GetU16(tag))
 U32   swf_GetU32(TAG * t);
+float swf_GetF16(TAG * t);
 void  swf_GetRGB(TAG * t, RGBA * col);
 void  swf_GetRGBA(TAG * t, RGBA * col);
 void  swf_GetGradient(TAG * t, GRADIENT * gradient, char alpha);
@@ -238,7 +242,14 @@ int   swf_SetU8(TAG * t,U8 v);              // resets Bitcount
 int   swf_SetU16(TAG * t,U16 v);
 void  swf_SetS16(TAG * t,int v);
 int   swf_SetU32(TAG * t,U32 v);
+void  swf_SetF16(TAG * t,float f);
 void  swf_SetString(TAG*t,const char*s);
+
+float floatToF16(float f);
+float F16toFloat(U16 x);
+
+float swf_GetFloat(TAG *tag);
+void swf_SetFloat(TAG *tag, float v);
 
 /* abc datatypes */
 U32 swf_GetU30(TAG*tag);
@@ -441,6 +452,7 @@ typedef struct _SHAPELINE
 
 int   swf_ShapeNew(SHAPE ** s);
 void  swf_ShapeFree(SHAPE * s);
+char  swf_ShapeIsEmpty(SHAPE*s);
 
 int   swf_GetSimpleShape(TAG * t,SHAPE ** s); // without Linestyle/Fillstyle Record
 int   swf_SetSimpleShape(TAG * t,SHAPE * s);   // without Linestyle/Fillstyle Record
@@ -470,6 +482,8 @@ int   swf_SetFillStyle(TAG * t,FILLSTYLE * f);
 int   swf_SetLineStyle(TAG * t,LINESTYLE * l);
 
 
+void swf_ShapeSetRectangle(TAG*tag, U16 shapeid, int width, int height, RGBA*rgba);
+void swf_ShapeSetRectangleWithBorder(TAG*tag, U16 shapeid, int width, int height, RGBA*rgba, int linewidth, RGBA*linecolor);
 void  swf_ShapeSetBitmapRect(TAG * t, U16 gfxid, int width, int height);
 
 //SHAPELINE* swf_ParseShapeData(U8*data, int bits, int fillbits, int linebits);
@@ -507,9 +521,9 @@ typedef struct _KERNING
 } SWFKERNING;
 
 typedef struct _SWFLAYOUT
-{ S16          ascent;
-  S16          descent;
-  S16          leading;
+{ U16          ascent;
+  U16          descent;
+  U16          leading;
   SRECT      * bounds;
   U16	       kerningcount;
   SWFKERNING * kerning;
@@ -520,11 +534,25 @@ typedef struct
   SHAPE *     shape;
 } SWFGLYPH;
 
+typedef struct _SWFGLYPHPAIR
+{
+    U16 char1;
+    U16 char2;
+    int num;
+} SWFGLYPHPAIR;
+
 typedef struct _FONTUSAGE
 { int* chars;
   char is_reduced;
   int used_glyphs;
   int glyphs_specified;
+  U16 smallest_size;
+
+  SWFGLYPHPAIR* neighbors;
+  int num_neighbors;
+  int neighbors_size;
+  int* neighbors_hash;
+  int neighbors_hash_size;
 } FONTUSAGE;
 
 #define FONT_STYLE_BOLD 1
@@ -533,9 +561,19 @@ typedef struct _FONTUSAGE
 #define FONT_ENCODING_ANSI 2
 #define FONT_ENCODING_SHIFTJIS 4
 
+#define FONTALIGN_THIN 0 
+#define FONTALIGN_MEDIUM 1
+#define FONTALIGN_THICK 2
+
+typedef struct _ALIGNZONE
+{
+    U16 x,y;
+    U16 dx,dy;
+} ALIGNZONE;
+
 typedef struct _SWFFONT
 { int		id; // -1 = not set
-  U8		version; // 0 = not set, 1 = definefont, 2 = definefont2
+  U8		version; // 0 = not set, 1 = definefont, 2 = definefont2, 3 = definefont3
   U8 *          name;
   SWFLAYOUT *   layout;
   int           numchars;
@@ -546,7 +584,10 @@ typedef struct _SWFFONT
 
   U16	*	glyph2ascii;
   int	*	ascii2glyph;
+  int   *       glyph2glyph; // only if the font is resorted
   SWFGLYPH *	glyph;
+  ALIGNZONE *	alignzones;
+  U8            alignzone_flags;
   U8		language;
   char **	glyphnames;
 
@@ -596,6 +637,8 @@ int swf_FontExtract_DefineFont2(int id, SWFFONT * font, TAG * tag);
 int swf_FontExtract_DefineFontInfo(int id, SWFFONT * f, TAG * t);
 int swf_FontExtract_DefineFont(int id, SWFFONT * f, TAG * t);
 int swf_FontExtract_GlyphNames(int id, SWFFONT * f, TAG * tag);
+int swf_FontExtract_DefineFontAlignZones(int id, SWFFONT * font, TAG * tag);
+
 
 int swf_FontIsItalic(SWFFONT * f);
 int swf_FontIsBold(SWFFONT * f);
@@ -605,17 +648,23 @@ int swf_FontReduce(SWFFONT * f);
 int swf_FontReduce_swfc(SWFFONT * f);
 
 int swf_FontInitUsage(SWFFONT * f);
-int swf_FontUseGlyph(SWFFONT * f, int glyph);
+int swf_FontUseGlyph(SWFFONT * f, int glyph, U16 size);
+void swf_FontUsePair(SWFFONT * f, int char1, int char2);
+int swf_FontUseGetPair(SWFFONT * f, int char1, int char2);
 int swf_FontUseAll(SWFFONT* f);
-int swf_FontUseUTF8(SWFFONT * f, U8 * s);
+int swf_FontUseUTF8(SWFFONT * f, const U8 * s, U16 size);
 int swf_FontUse(SWFFONT* f,U8 * s);
+void swf_FontSort(SWFFONT * font);
 
 int swf_FontSetDefine(TAG * t,SWFFONT * f);
 int swf_FontSetDefine2(TAG * t,SWFFONT * f);
 int swf_FontSetInfo(TAG * t,SWFFONT * f);
+void swf_FontSetAlignZones(TAG*t, SWFFONT *f);
 
 void swf_FontCreateLayout(SWFFONT*f);
+void swf_FontCreateAlignZones(SWFFONT * f);
 void swf_FontAddLayout(SWFFONT * f, int ascent, int descent, int leading);
+void swf_FontPostprocess(SWF*swf);
 
 int swf_ParseDefineText(TAG * t, void(*callback)(void*self, int*chars, int*xpos, int nr, int fontid, int fontsize, int xstart, int ystart, RGBA* color), void*self);
 
@@ -646,9 +695,9 @@ void swf_DrawText(drawer_t*draw, SWFFONT*font, int size, const char*text);
 
 // swffont.c
 
-SWFFONT* swf_LoadTrueTypeFont(const char*filename);
+SWFFONT* swf_LoadTrueTypeFont(const char*filename, char flashtype);
 SWFFONT* swf_LoadT1Font(const char*filename);
-SWFFONT* swf_LoadFont(const char*filename);
+SWFFONT* swf_LoadFont(const char*filename, char flashtype);
 
 void swf_SetLoadFontParameters(int scale, int skip_unused, int full_unicode);
 
@@ -697,7 +746,6 @@ void swf_SetLosslessImage(TAG*tag, RGBA*data, int width, int height); //WARNING:
 RGBA* swf_DefineLosslessBitsTagToImage(TAG*tag, int*width, int*height);
 
 RGBA* swf_ExtractImage(TAG*tag, int*dwidth, int*dheight);
-RGBA* swf_ImageScale(RGBA*data, int width, int height, int newwidth, int newheight);
 TAG* swf_AddImage(TAG*tag, int bitid, RGBA*mem, int width, int height, int quality);
 
 // swfsound.c
@@ -893,9 +941,9 @@ void action_fixjump(ActionMarker m1, ActionMarker m2);
 
 extern char*blendModeNames[];
 
-int swf_ObjectPlace(TAG * t,U16 id,U16 depth,MATRIX * m,CXFORM * cx,const U8 * name);
-int swf_ObjectPlaceClip(TAG * t,U16 id,U16 depth,MATRIX * m,CXFORM * cx,const U8 * name, U16 clipaction);
-int swf_ObjectPlaceBlend(TAG * t,U16 id,U16 depth,MATRIX * m,CXFORM * cx,const U8 * name, U8 blendmode);
+int swf_ObjectPlace(TAG * t,U16 id,U16 depth,MATRIX * m,CXFORM * cx,const char* name);
+int swf_ObjectPlaceClip(TAG * t,U16 id,U16 depth,MATRIX * m,CXFORM * cx,const char* name, U16 clipaction);
+int swf_ObjectPlaceBlend(TAG * t,U16 id,U16 depth,MATRIX * m,CXFORM * cx,const char* name, U8 blendmode);
 int swf_ObjectMove(TAG * t,U16 depth,MATRIX * m,CXFORM * cx);
 
 #define PF_MOVE         0x01
@@ -912,14 +960,31 @@ int swf_ObjectMove(TAG * t,U16 depth,MATRIX * m,CXFORM * cx);
 #define PF2_ASBITMAP     0x04
 //...
 
+#define BLENDMODE_NORMAL 0
+#define BLENDMODE_NORMAL2 1
+#define BLENDMODE_LAYER 2
+#define BLENDMODE_MULTIPLY 3
+#define BLENDMODE_SCREEN 4
+#define BLENDMODE_LIGHTEN 5
+#define BLENDMODE_DARKEN 6
+#define BLENDMODE_ADD 7
+#define BLENDMODE_SUBSTRACT 8
+#define BLENDMODE_DIFFERENCE 9
+#define BLENDMODE_INVERT 10
+#define BLENDMODE_ALPHA 11
+#define BLENDMODE_ERASE 12
+#define BLENDMODE_OVERLAY 13
+#define BLENDMODE_HARDLIGHT 14
+
 typedef struct _SWFPLACEOBJECT {
+    U8 flags;
     U16 depth;
     U16 id; // may be 0
     char move; //true: move/replace character, false: set character
     MATRIX matrix;
     CXFORM cxform;
     U16 ratio;
-    U8*name;
+    char*name;
     U16 clipdepth;
     ActionTAG* actions;
     U8 blendmode;
@@ -1134,6 +1199,38 @@ typedef struct _FILTER_GLOW {
     char knockout;
     char composite;
 } FILTER_GLOW;
+
+typedef struct _FILTER_GRADIENTBEVEL {
+    U8 type;
+    GRADIENT*gradient;
+    double blurx;
+    double blury;
+    double angle;
+    double distance;
+    float strength;
+    char innershadow;
+    char knockout;
+    char composite;
+    char ontop;
+    int passes;
+} FILTER_GRADIENTBEVEL;
+
+typedef struct _FILTER_CONVOLUTION {
+    U8 type;
+    U8 matrixx;
+    U8 matrixy;
+    float divisor;
+    float bias;
+    float *matrix;
+    RGBA defaultcolor;
+    char clampmode;
+    char preservealpha;
+} FILTER_CONVOLUTION;
+
+typedef struct _FILTER_COLORMATRIX {
+    U8 type;
+    float matrix[20];
+} FILTER_COLORMATRIX;
 
 void swf_SetFilter(TAG*tag, FILTER*f);
 FILTER*swf_GetFilter(TAG*tag);

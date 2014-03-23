@@ -21,6 +21,11 @@
 
 #include <stdio.h>
 #include "types.h"
+#include "../config.h"
+
+#ifdef HAVE_ZZIP
+#include "zzip/lib.h"
+#endif
 
 #ifndef __rfxswf_bitio_h__
 #define __rfxswf_bitio_h__
@@ -31,6 +36,8 @@
 #define READER_TYPE_ZLIB_C 4
 #define READER_TYPE_ZLIB READER_TYPE_ZLIB_U
 #define READER_TYPE_NULL 5
+#define READER_TYPE_FILE2 6
+#define READER_TYPE_ZZIP 7
 
 #define WRITER_TYPE_FILE 1
 #define WRITER_TYPE_MEM  2
@@ -43,6 +50,7 @@
 typedef struct _reader
 {
     int (*read)(struct _reader*, void*data, int len);
+    int (*seek)(struct _reader*, int pos);
     void (*dealloc)(struct _reader*);
 
     void *internal;
@@ -76,6 +84,9 @@ float reader_readFloat(reader_t*r);
 double reader_readDouble(reader_t*r);
 char*reader_readString(reader_t*r);
 
+unsigned int read_compressed_uint(reader_t*r);
+int read_compressed_int(reader_t*r);
+
 void writer_resetbits(writer_t*w);
 void writer_writebit(writer_t*w, int bit);
 void writer_writebits(writer_t*w, unsigned int data, int bits);
@@ -87,12 +98,19 @@ void writer_writeFloat(writer_t*w, float f);
 void writer_writeDouble(writer_t*w, double f);
 void writer_writeString(writer_t*w, const char*s);
 
+void write_compressed_uint(writer_t*w, unsigned int u);
+void write_compressed_int(writer_t*w, int i);
+
 /* standard readers / writers */
 
 void reader_init_filereader(reader_t*r, int handle);
+int reader_init_filereader2(reader_t*r, const char*filename);
 void reader_init_zlibinflate(reader_t*r, reader_t*input);
 void reader_init_memreader(reader_t*r, void*data, int length);
 void reader_init_nullreader(reader_t*r);
+#ifdef HAVE_ZZIP
+void reader_init_zzipreader(reader_t*r,ZZIP_FILE*z);
+#endif
 
 void writer_init_filewriter(writer_t*w, int handle);
 void writer_init_filewriter2(writer_t*w, char*filename);

@@ -66,7 +66,7 @@ inline gfxcolor_t transform_color(internal_t*i, gfxcolor_t*col)
     col2.r = col->r;
     col2.g = col->g;
     col2.b = col->b;
-    col2.a = (col->a * i->alpha)>>8;
+    col2.a = (col->a * i->alpha)/255;
     return col2;
 }
 
@@ -146,10 +146,10 @@ void ops_drawchar(struct _gfxdevice*dev, gfxfont_t*font, int glyphnr, gfxcolor_t
     i->out->drawchar(i->out, font, glyphnr, color, matrix);
 }
 
-void ops_drawlink(struct _gfxdevice*dev, gfxline_t*line, const char*action)
+void ops_drawlink(struct _gfxdevice*dev, gfxline_t*line, const char*action, const char*text)
 {
     internal_t*i = (internal_t*)dev->internal;
-    i->out->drawlink(i->out, line, action);
+    i->out->drawlink(i->out, line, action, text);
 }
 
 void ops_endpage(struct _gfxdevice*dev)

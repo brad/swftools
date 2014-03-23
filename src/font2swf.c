@@ -31,6 +31,7 @@ static char * destfilename = "output.swf";
 static int all=0;
 static int verbose=0;
 static char * fontname = 0;
+static char config_flashtype = 0;
 
 static struct options_t options[] = {
 {"h", "help"},
@@ -52,6 +53,10 @@ int args_callback_option(char*name,char*val)
     }
     else if(!strcmp(name, "v")) {
 	verbose ++;
+	return 0;
+    }
+    else if(!strcmp(name, "T")) {
+	config_flashtype=1;
 	return 0;
     }
     else if(!strcmp(name, "n")) {
@@ -97,7 +102,10 @@ static void convertFont(char*infile, char*outfile)
 {
     SWFFONT * font;
     
-    font = swf_LoadFont(infile);
+    font = swf_LoadFont(infile, config_flashtype);
+    if(!font) 
+        exit(1);
+    swf_FontCreateAlignZones(font);
 
     if(fontname)
         font->name = strdup(fontname);

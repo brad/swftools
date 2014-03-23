@@ -27,6 +27,8 @@
 #include "parser.h"
 #include "parser.tab.h"
 #include "compiler.h"
+#include "registry.h"
+#include "assets.h"
 #include "../os.h"
 #ifdef HAVE_SYS_STAT_H
 #include <sys/stat.h>
@@ -113,6 +115,7 @@ static void as3_parse_file_or_array(const char*name, const char*filename, const 
     a3_parse();
     as3_lex_destroy();
     finish_file();
+    if(fi) fclose(fi);
 }
 
 typedef struct _scheduled_file {
@@ -155,7 +158,7 @@ void as3_schedule_file(const char*name, const char*filename)
     }
 
     filename = normalize_path(filename);
-    
+
     if(dict_contains(scheduled_dict, filename)) {
         return; //already processed
     } else {
@@ -302,22 +305,19 @@ static void schedule_class(const char*package, const char*cls, char error)
 
     strcpy(filename+t, cls);
     strcpy(filename+t+l2, ".as");
-    char*f=0;
-    if(!(f=find_file(filename, error))) {
+    char*f=find_file(filename, error);
+    if(!f) {
         int i;
-        /* try lower case filename (not packagename!), too */
-        for(i=t;i<t+l2;i++) {
-            if(filename[i]>='A' && filename[i]<='Z')
-                filename[i] += 'a'-'A';
-        }
-        if(!(f=find_file(filename, error))) {
-            if(error) {
-                strcpy(filename+t, cls);
-                strcpy(filename+t+l2, ".as");
-                as3_warning("Could not open file %s", filename);
-            }
-            return;
-        }
+	filename = filename_to_lowercase(filename);
+        f=find_file(filename, error);
+    }
+    if(!f) {
+	if(error) {
+	    strcpy(filename+t, cls);
+	    strcpy(filename+t+l2, ".as");
+	    as3_warning("Could not open file %s", filename);
+	}
+	return;
     }
     as3_schedule_file(filename, f);
 }
@@ -343,6 +343,10 @@ void* as3_getcode()
         as3code = finish_parser();
     }
     return as3code;
+}
+void* as3_getassets(void*t)
+{
+    return swf_AssetsToTags((TAG*)t, registry_getassets());
 }
 char* as3_getglobalclass()
 {

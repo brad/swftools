@@ -39,6 +39,7 @@
 #include <stdarg.h>
 #include "../lib/rfxswf.h"
 #include "../lib/args.h"
+#include "../lib/utf8.h"
 
 static char * filename = 0;
 
@@ -298,7 +299,7 @@ void dumpFont(TAG*tag, char*prefix)
 {
     SWFFONT* font = malloc(sizeof(SWFFONT));
     memset(font, 0, sizeof(SWFFONT));
-    if(tag->id == ST_DEFINEFONT2) {
+    if(tag->id == ST_DEFINEFONT2 || tag->id == ST_DEFINEFONT3) {
 	swf_FontExtract_DefineFont2(0, font, tag);
     } else if(tag->id == ST_DEFINEFONT) {
 	swf_FontExtract_DefineFont(0, font, tag);
@@ -323,7 +324,10 @@ void dumpFont(TAG*tag, char*prefix)
     int t;
     for(t=0;t<font->numchars;t++) {
 	int u = font->glyph2ascii?font->glyph2ascii[t]:-1;
-	printf("%s== Glyph %d: advance=%d encoding=%d ==\n", prefix, t, font->glyph[t].advance, u);
+	char ustr[16];
+	if(u>=32) sprintf(ustr, " '%c'", u);
+	else      sprintf(ustr, " 0x%02x", u);
+	printf("%s== Glyph %d: advance=%d encoding=%d%s ==\n", prefix, t, font->glyph[t].advance, u, ustr);
 	SHAPE2* shape = swf_ShapeToShape2(font->glyph[t].shape);
 	SHAPELINE*line = shape->lines;
 
@@ -375,14 +379,16 @@ void dumpFont(TAG*tag, char*prefix)
     swf_FontFree(font);
 }
 
-SWF swf;
-int fontnum = 0;
-SWFFONT**fonts;
+static SWF swf;
+static int fontnum = 0;
+static SWFFONT**fonts;
 
-void textcallback(void*self, int*glyphs, int*ypos, int nr, int fontid, int fontsize, int startx, int starty, RGBA*color) 
+void textcallback(void*self, int*glyphs, int*xpos, int nr, int fontid, int fontsize, int startx, int starty, RGBA*color) 
 {
     int font=-1,t;
-    printf("                <%2d glyphs in font %2d size %d, color #%02x%02x%02x%02x> ",nr, fontid, fontsize, color->r, color->g, color->b, color->a);
+    if(nr<1) 
+	return;
+    printf("                <%2d glyphs in font %04d size %d, color #%02x%02x%02x%02x at %.2f,%.2f> ",nr, fontid, fontsize, color->r, color->g, color->b, color->a, (startx+xpos[0])/20.0, starty/20.0);
     for(t=0;t<fontnum;t++)
     {
 	if(fonts[t]->id == fontid) {
@@ -393,7 +399,7 @@ void textcallback(void*self, int*glyphs, int*ypos, int nr, int fontid, int fonts
 
     for(t=0;t<nr;t++)
     {
-	unsigned char a; 
+	unsigned int a;
 	if(font>=0) {
 	    if(glyphs[t] >= fonts[font]->numchars  /*glyph is in range*/
 		    || !fonts[font]->glyph2ascii /* font has ascii<->glyph mapping */
@@ -407,18 +413,34 @@ void textcallback(void*self, int*glyphs, int*ypos, int nr, int fontid, int fonts
 	} else {
 	    a = glyphs[t];
 	}
-	if(a>=32)
-	    printf("%c", a);
-	else
+	if(a>=32) {
+	    char* utf8 = getUTF8(a);
+	    printf("%s", utf8);
+	} else {
 	    printf("\\x%x", (int)a);
+	}
     }
     printf("\n");
 }
 
-void handleText(TAG*tag) 
+void handleText(TAG*tag, char*prefix) 
 {
   printf("\n");
-  swf_ParseDefineText(tag,textcallback, 0);
+  if(placements) {
+      swf_SetTagPos(tag, 0);
+      swf_GetU16(tag);
+      swf_GetRect(tag, 0);
+      swf_ResetReadBits(tag);
+      MATRIX m;
+      swf_GetMatrix(tag, &m);
+      printf("%s| Matrix\n",prefix);
+      printf("%s| %5.3f %5.3f %6.2f\n", prefix, m.sx/65536.0, m.r1/65536.0, m.tx/20.0);
+      printf("%s| %5.3f %5.3f %6.2f\n", prefix, m.r0/65536.0, m.sy/65536.0, m.ty/20.0);
+      swf_SetTagPos(tag, 0);
+  }
+  if(showtext) {
+      swf_ParseDefineText(tag,textcallback, 0);
+  }
 }
 	    
 void handleDefineSound(TAG*tag)
@@ -590,7 +612,7 @@ void handleVideoFrame(TAG*tag, char*prefix)
 
     deblock = swf_GetBits(tag, 1);
     if(deblock)
-	printf(" deblock ", deblock);
+	printf(" deblock %d ", deblock);
     quantizer = swf_GetBits(tag, 5);
     printf(" quant: %d ", quantizer);
 }
@@ -933,6 +955,28 @@ void hexdumpTag(TAG*tag, char* prefix)
     }
 }
 
+void handleImportAssets(TAG*tag, char* prefix, int assets2)
+{
+    int num;
+    U16 id;
+    char* url, *name;
+    int t;
+    url = swf_GetString(tag);
+    printf("%sfrom %s\n", prefix, url);
+    if(assets2)
+    {
+        swf_GetU8(tag); // Reserved: Must be 1
+        swf_GetU8(tag); // Reserved: Must be 0
+    }
+    num = swf_GetU16(tag);
+    for(t=0;t<num;t++)
+    {
+        id = swf_GetU16(tag);
+        name = swf_GetString(tag);
+        printf("%s  import %04d named \"%s\"\n", prefix, id, name);
+    }
+}
+
 void handleExportAssets(TAG*tag, char* prefix)
 {
     int num;
@@ -947,6 +991,98 @@ void handleExportAssets(TAG*tag, char* prefix)
 	printf("%sexports %04d as \"%s\"\n", prefix, id, name);
     }
 }
+
+static void handleFontAlign1(TAG*tag)
+{
+    swf_SetTagPos(tag, 0);
+    U16 id = swf_GetU16(tag);
+    U8 flags = swf_GetU8(tag);
+    printf(" for font %04d, ", id);
+    if((flags&3)==0) printf("thin, ");
+    else if((flags&3)==1) printf("medium, ");
+    else if((flags&3)==2) printf("thick, ");
+    else printf("?, ");
+    int num=0;
+    while(tag->pos < tag->len) {
+	int nr = swf_GetU8(tag); // should be 2
+	int t;
+	if(nr>2) {
+	    printf("*** unsupported multiboxes ***, ");
+	    break;
+	}
+	for(t=0;t<nr;t++) {
+	    float v1 = swf_GetF16(tag);
+	    float v2 = swf_GetF16(tag);
+	}
+	U8 xyflags = swf_GetU8(tag);
+	num++;
+    }
+    printf(" %d glyphs", num);
+}
+
+#define ALIGN_WITH_GLYPHS
+static void handleFontAlign2(TAG*tag, char*prefix)
+{
+    if(!showfonts)
+	return;
+    swf_SetTagPos(tag, 0);
+    U16 id = swf_GetU16(tag);
+    swf_GetU8(tag);
+    int num = 0;
+#ifdef ALIGN_WITH_GLYPHS
+    SWF swf;
+    swf.firstTag = tag;
+    while(swf.firstTag->prev) swf.firstTag = swf.firstTag->prev;
+    SWFFONT* font = 0;
+    swf_FontExtract(&swf, id, &font);
+#endif
+    swf_SetTagPos(tag, 3);
+    while(tag->pos < tag->len) {
+	printf("%sglyph %d) ", prefix, num);
+	int nr = swf_GetU8(tag); // should be 2
+	int t;
+	for(t=0;t<2;t++) {
+	    // pos
+	    float v = swf_GetF16(tag);
+	    printf("%f ", v*1024.0);
+	}
+	int s;
+	for(s=0;s<nr-1;s++) {
+	    for(t=0;t<2;t++) {
+		// width
+		float v = swf_GetF16(tag);
+		printf("+%f ", v*1024.0);
+	    }
+	}
+	U8 xyflags = swf_GetU8(tag);
+	printf("xy:%02x\n", xyflags);
+
+#ifdef ALIGN_WITH_GLYPHS
+	if(font && num<font->numchars) {
+	    SHAPE2* shape = swf_ShapeToShape2(font->glyph[num].shape);
+	    SHAPELINE*line = shape->lines;
+	    while(line) {
+		if(line->type == moveTo) {
+		    printf("%smoveTo %.2f %.2f\n", prefix, line->x/20.0, line->y/20.0);
+		} else if(line->type == lineTo) {
+		    printf("%slineTo %.2f %.2f\n", prefix, line->x/20.0, line->y/20.0);
+		} else if(line->type == splineTo) {
+		    printf("%ssplineTo (%.2f %.2f) %.2f %.2f\n", prefix,
+			    line->sx/20.0, line->sy/20.0,
+			    line->x/20.0, line->y/20.0
+			    );
+		}
+		line = line->next;
+	    }
+	    swf_Shape2Free(shape);
+	    free(shape);
+	}
+	if(num==font->numchars-1) break;
+#endif
+	num++;
+    }
+}
+
 
 void dumperror(const char* format, ...)
 {
@@ -1106,7 +1242,7 @@ int main (int argc,char ** argv)
 		   "   PLAY=\"true\" ALIGN=\"\" LOOP=\"true\" QUALITY=\"high\"\n"
 		   "   TYPE=\"application/x-shockwave-flash\"\n"
                    "   ALLOWSCRIPTACCESS=\"always\"\n"
-		   "   PLUGINSPAGE=\"http://www.macromedia.com/go/getflashplayer\">\n"
+		   "   PLUGINSPAGE=\"http://get.adobe.com/flashplayer/\">\n"
 		   "  </EMBED>\n" 
 		   "</OBJECT>\n", xsize, ysize, fileversions[swf.fileVersion], 
 				  filename, filename, xsize, ysize);
@@ -1121,7 +1257,7 @@ int main (int argc,char ** argv)
 	else
 	    printf("\n");
     }
-    printf("[HEADER]        File size: %ld%s\n", swf.fileSize, swf.compressed?" (Depacked)":"");
+    printf("[HEADER]        File size: %d%s\n", swf.fileSize, swf.compressed?" (Depacked)":"");
     printf("[HEADER]        Frame rate: %f\n",swf.frameRate/256.0);
     printf("[HEADER]        Frame count: %d\n",swf.frameCount);
     printf("[HEADER]        Movie width: %.2f",(swf.movieSize.xmax-swf.movieSize.xmin)/20.0);
@@ -1158,25 +1294,12 @@ int main (int argc,char ** argv)
 	}
 	if(cumulative) {
 	    filepos += tag->len;
-	    printf("[%03x] %9ld %9ld %s%s", tag->id, tag->len, filepos, prefix, swf_TagGetName(tag));
+	    printf("[%03x] %9d %9d %s%s", tag->id, tag->len, filepos, prefix, swf_TagGetName(tag));
 	} else {
-	    printf("[%03x] %9ld %s%s", tag->id, tag->len, prefix, swf_TagGetName(tag));
+	    printf("[%03x] %9d %s%s", tag->id, tag->len, prefix, swf_TagGetName(tag));
 	}
 	
-        if(swf_isDefiningTag(tag)) {
-            U16 id = swf_GetDefineID(tag);
-            printf(" defines id %04d", id);
-            if(idtab[id])
-                dumperror("Id %04d is defined more than once.", id);
-            idtab[id] = 1;
-        }
-	else if(swf_isPseudoDefiningTag(tag)) {
-            U16 id = swf_GetDefineID(tag);
-            printf(" adds information to id %04d", id);
-            if(!idtab[id])
-                dumperror("Id %04d is not yet defined.\n", id);
-	}
-        else if(tag->id == ST_PLACEOBJECT) {
+        if(tag->id == ST_PLACEOBJECT) {
             printf(" places id %04d at depth %04x", swf_GetPlaceID(tag), swf_GetDepth(tag));
             if(swf_GetName(tag))
                 printf(" name \"%s\"",swf_GetName(tag));
@@ -1220,10 +1343,12 @@ int main (int argc,char ** argv)
         else if(tag->id == ST_FILEATTRIBUTES) {
             swf_SetTagPos(tag, 0);
             U32 flags = swf_GetU32(tag);
-            if(flags&1) printf(" usenetwork");
-            if(flags&8) printf(" as3");
-            if(flags&16) printf(" symbolclass");
-            if(flags&~(1|8|16))
+            if(flags&FILEATTRIBUTE_USENETWORK) printf(" usenetwork");
+            if(flags&FILEATTRIBUTE_AS3) printf(" as3");
+            if(flags&FILEATTRIBUTE_SYMBOLCLASS) printf(" symbolclass");
+            if(flags&FILEATTRIBUTE_USEHARDWAREGPU) printf(" hardware-gpu");
+            if(flags&FILEATTRIBUTE_USEACCELERATEDBLIT) printf(" accelerated-blit");
+            if(flags&~(1|8|16|32|64))
                 printf(" flags=%02x", flags);
         }
         else if(tag->id == ST_DOABC) {
@@ -1263,7 +1388,7 @@ int main (int argc,char ** argv)
 	    }
 	}
 	else if(tag->id == ST_FRAMELABEL) {
-	    int l = strlen(tag->data);
+	    int l = strlen((char*)tag->data);
 	    printf(" \"%s\"", tag->data);
 	    if((l+1) < tag->len) {
 		printf(" has %d extra bytes", tag->len-1-l);
@@ -1275,8 +1400,8 @@ int main (int argc,char ** argv)
 		dumperror("Frame %d has more than one label", 
 			issprite?spriteframe:mainframe);
 	    }
-	    if(issprite) spriteframelabel = tag->data;
-	    else framelabel = tag->data;
+	    if(issprite) spriteframelabel = (char*)tag->data;
+	    else framelabel = (char*)tag->data;
 	}
 	else if(tag->id == ST_SHOWFRAME) {
 	    char*label = issprite?spriteframelabel:framelabel;
@@ -1313,6 +1438,9 @@ int main (int argc,char ** argv)
 		printf(" %s", swf_GetString(tag));
 	    }
 	}
+	else if(tag->id == ST_DEFINEFONTALIGNZONES) {
+	    handleFontAlign1(tag);
+	}
 	else if(tag->id == ST_CSMTEXTSETTINGS) {
 	    U16 id = swf_GetU16(tag);
 	    U8 flags = swf_GetU8(tag);
@@ -1332,6 +1460,19 @@ int main (int argc,char ** argv)
 	    float sharpness = swf_GetFixed(tag);
 	    printf("s=%.2f,t=%.2f)", thickness, sharpness);
 	    swf_GetU8(tag);
+	}
+	else if(swf_isDefiningTag(tag)) {
+            U16 id = swf_GetDefineID(tag);
+            printf(" defines id %04d", id);
+            if(idtab[id])
+                dumperror("Id %04d is defined more than once.", id);
+            idtab[id] = 1;
+        }
+	else if(swf_isPseudoDefiningTag(tag)) {
+            U16 id = swf_GetDefineID(tag);
+            printf(" adds information to id %04d", id);
+            if(!idtab[id])
+                dumperror("Id %04d is not yet defined.\n", id);
 	}
 
 	if(tag->id == ST_DEFINEBITSLOSSLESS ||
@@ -1361,10 +1502,7 @@ int main (int argc,char ** argv)
 	    printf(" URL: %s\n", s);
 	}
 	else if(tag->id == ST_DEFINETEXT || tag->id == ST_DEFINETEXT2) {
-	    if(showtext)
-		handleText(tag);
-	    else
-		printf("\n");
+	    handleText(tag, myprefix);
 	}
 	else if(tag->id == ST_DEFINESCALINGGRID) {
 	    U16 id = swf_GetU16(tag);
@@ -1409,6 +1547,9 @@ int main (int argc,char ** argv)
 	    if(tag->len)
 		dumperror("End Tag not empty");
         }
+        else if(tag->id == ST_IMPORTASSETS || tag->id == ST_IMPORTASSETS2) {
+            handleImportAssets(tag, myprefix, tag->id==ST_IMPORTASSETS2?1:0);
+        }
 	else if(tag->id == ST_EXPORTASSETS || tag->id == ST_SYMBOLCLASS) {
 	    handleExportAssets(tag, myprefix);
 	}
@@ -1449,6 +1590,9 @@ int main (int argc,char ** argv)
 	}
 	else if(tag->id == ST_PLACEOBJECT2 || tag->id == ST_PLACEOBJECT3) {
 	    handlePlaceObject23(tag, myprefix);
+	}
+	else if(tag->id == ST_DEFINEFONTALIGNZONES) {
+	    handleFontAlign2(tag, myprefix);
 	}
 	else if(tag->id == ST_DEFINEFONTNAME) {
 	    swf_SetTagPos(tag, 0);

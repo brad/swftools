@@ -187,13 +187,14 @@ static char* getTempDir()
     if(!dir) dir = getenv("temp");
     if(!dir) dir = "C:\\";
 #else
-    char* dir = "/tmp/";
+    char*dir = getenv("SWFTOOLS_TMP");
+    if(!dir) dir = "/tmp/";
 #endif
     return dir;
 }
 
-char* mktempname(char*ptr) {
-    static char tmpbuf[128];
+char* mktempname(char*ptr, const char*ext) {
+    static char tmpbuf[160];
     char*dir = getTempDir();
     int l = strlen(dir);
     char*sep = "";
@@ -207,20 +208,24 @@ char* mktempname(char*ptr) {
 #endif
     }
 
- //   used to be mktemp. This does remove the warnings, but
- //   It's not exactly an improvement.
 #ifdef HAVE_LRAND48
-    sprintf(ptr, "%s%s%08x%08x",dir,sep,lrand48(),lrand48());
+    unsigned int r1 = (unsigned int)lrand48();
+    unsigned int r2 = (unsigned int)lrand48();
+#elif HAVE_RAND
+    unsigned int r1 = rand();
+    unsigned int r2 = rand();
 #else
-#   ifdef HAVE_RAND
-	sprintf(ptr, "%s%s%08x%08x",dir,sep,rand(),rand());
-#   else
-	static int count = 1;
-	sprintf(ptr, "%s%s%08x%04x%04x",dir,sep,time(0),(unsigned int)tmpbuf^((unsigned int)tmpbuf)>>16,count);
-	count ++;
-#   endif
+    static int count = 1;
+    unsigned int r1 = time(0);
+    unsigned int r2 = (unsigned int)tmpbuf<<8^count;
+    count ++;
 #endif
-     return ptr;
+    if(ext) {
+	sprintf(ptr, "%s%s%04x%04x.%s",dir,sep,r1,r2,ext);
+    } else {
+	sprintf(ptr, "%s%s%04x%04x",dir,sep,r1,r2);
+    }
+    return ptr;
 }
 
 memfile_t* memfile_open(const char*path)
@@ -240,6 +245,7 @@ memfile_t* memfile_open(const char*path)
     }
     file->len = sb.st_size;
     file->data = mmap(0, sb.st_size, PROT_READ, MAP_PRIVATE, fi, 0);
+    close(fi);
 #else
     FILE*fi = fopen(path, "rb");
     if(!fi) {
@@ -272,5 +278,80 @@ void memfile_close(memfile_t*file)
     file->data = 0;
     file->len = 0;
     free(file);
+}
+
+void move_file(const char*from, const char*to)
+{
+    int result = rename(from, to);
+
+    if(result==0) return; //done!
+
+    /* if we can't rename, for some reason, copy the file
+       manually */
+    FILE*fi = fopen(from, "rb");
+    if(!fi) {
+	perror(from);
+	return;
+    }
+    FILE*fo = fopen(to, "wb");
+    if(!fo) {
+	perror(to);
+	return;
+    }
+    char buffer[16384];
+    while(1) {
+	int bytes = fread(buffer, 1, 16384, fi);
+	if(bytes<=0)
+	    break;
+	fwrite(buffer, bytes, 1, fo);
+    }
+
+    fclose(fo);
+    fclose(fi);
+    unlink(from);
+}
+
+char file_exists(const char*filename)
+{
+#ifdef HAVE_STAT
+    struct stat sb;
+    return stat(filename, &sb) >= 0;
+#else
+    int fi = open(filename, O_RDONLY);
+    if(fi>=0) {
+        close(fi);
+        return 1;
+    }
+    return 0;
+#endif
+}
+
+int file_size(const char*filename)
+{
+#ifdef HAVE_STAT
+    struct stat sb;
+    if(stat(filename, &sb) >= 0) {
+        return sb.st_size;
+    }
+#endif
+    FILE*fi = fopen(filename, "rb");
+    if(fi>=0) {
+        fseek(fi, 0, SEEK_END);
+        int size = ftell(fi);
+        fclose(fi);
+        return size;
+    }
+    return 0;
+}
+
+int open_file_or_stdin(const char*filename, int attr)
+{
+    int f;
+    if(strcmp(filename, "-")) {
+        f = open(filename, attr);
+    } else {
+        f = 0; //stdin
+    }
+    return f;
 }
 

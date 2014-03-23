@@ -30,12 +30,15 @@
 #include "../../swftools/lib/gfxsource.h"
 #include "../../swftools/lib/gfxdevice.h"
 #include "../../swftools/lib/gfxpoly.h"
+#include "../../swftools/lib/devices/pdf.h"
 #include "../../swftools/lib/devices/swf.h"
 #include "../../swftools/lib/devices/text.h"
 #include "../../swftools/lib/devices/render.h"
+#include "../../swftools/lib/devices/file.h"
 #include "../../swftools/lib/devices/bbox.h"
+#ifdef HAVE_LRF
 #include "../../swftools/lib/devices/lrf.h"
-#include "../../swftools/lib/devices/ocr.h"
+#endif
 #include "../../swftools/lib/devices/rescale.h"
 #include "../../swftools/lib/devices/record.h"
 #include "../../swftools/lib/readers/image.h"
@@ -49,7 +52,7 @@ static char * outputname = 0;
 static int loglevel = 3;
 static char * pagerange = 0;
 static char * filename = 0;
-static const char * format = "ocr";
+static const char * format = 0;
 
 int args_callback_option(char*name,char*val) {
     if (!strcmp(name, "o"))
@@ -98,9 +101,9 @@ int args_callback_option(char*name,char*val) {
 	if(c && *c && c[1])  {
 	    *c = 0;
 	    c++;
-	    driver->set_parameter(driver, s,c);
+	    driver->setparameter(driver, s,c);
 	} else {
-	    driver->set_parameter(driver, s,"1");
+	    driver->setparameter(driver, s,"1");
         }
         free(s);
 	return 1;
@@ -187,7 +190,7 @@ int main(int argn, char *argv[])
     }
     is_in_range(0x7fffffff, pagerange);
     if(pagerange)
-	driver->set_parameter(driver, "pages", pagerange);
+	driver->setparameter(driver, "pages", pagerange);
 
     if(!filename) {
 	args_callback_usage(argv[0]);
@@ -200,8 +203,16 @@ int main(int argn, char *argv[])
         exit(1);
     }
 
+    if(!format) {
+	char*x = strrchr(outputname, '.');
+	if(x) 
+	    format = x+1;
+    }
+
+
     gfxresult_t*result = 0;
-    if(!strcmp(format, "lrf")) {
+#ifdef HAVE_LRF
+    if(!strcasecmp(format, "lrf")) {
         gfxdevice_t lrf;
         gfxdevice_lrf_init(&lrf);
 
@@ -234,17 +245,25 @@ int main(int argn, char *argv[])
             }
         }
         result = out->finish(out);
-    } else {
+    } else 
+#endif
+    {
         gfxdevice_t _out,*out=&_out;
-        if(!strcmp(format, "ocr")) {
-            gfxdevice_ocr_init(out);
-        } if(!strcmp(format, "swf")) {
+        if(!strcasecmp(format, "swf")) {
             gfxdevice_swf_init(out);
-        } if(!strcmp(format, "img")) {
+        } else if(!strcasecmp(format, "img") || !strcasecmp(format, "png")) {
             gfxdevice_render_init(out);
-        } if(!strcmp(format, "txt")) {
+	    out->setparameter(out, "antialize", "4");
+        } else if(!strcasecmp(format, "txt")) {
             gfxdevice_text_init(out);
-        }
+        } else if(!strcasecmp(format, "log")) {
+            gfxdevice_file_init(out, "/tmp/device.log");
+        } else if(!strcasecmp(format, "pdf")) {
+            gfxdevice_pdf_init(out);
+        } else {
+	    msg("<error> Invalid output format: %s", format);
+	    exit(1);
+	}
 
         int pagenr;
         for(pagenr = 1; pagenr <= doc->num_pages; pagenr++) 

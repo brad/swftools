@@ -22,12 +22,12 @@
 
 #include <Python.h>
 #include <stdarg.h>
+#include <setjmp.h>
 #undef HAVE_STAT
 #include "../../config.h"
 #include "../gfxtools.h"
 #include "../devices/swf.h"
 #include "../devices/render.h"
-#include "../devices/ocr.h"
 #include "../devices/rescale.h"
 #include "../devices/text.h"
 #ifdef USE_OPENGL
@@ -37,15 +37,42 @@
 #include "../readers/swf.h"
 #include "../readers/image.h"
 #include "../log.h"
+#include "../kdtree.h"
 #include "../utf8.h"
+#include "../gfxdevice.h"
+#include "../gfximage.h"
 
-static gfxsource_t*pdfdriver = 0;
-static gfxsource_t*swfdriver = 0;
-static gfxsource_t*imagedriver = 0;
+#define PYTHON_GFX_VERSION VERSION
 
-staticforward PyTypeObject OutputClass;
-staticforward PyTypeObject PageClass;
-staticforward PyTypeObject DocClass;
+#if PY_MAJOR_VERSION >= 3
+#define PYTHON3
+#define M_FLAGS (METH_VARARGS|METH_KEYWORDS)
+#else
+#define M_FLAGS (METH_KEYWORDS)
+#endif
+
+typedef struct _state {
+    gfxsource_t*pdfdriver;
+    gfxsource_t*swfdriver;
+    gfxsource_t*imagedriver;
+} state_t;
+
+#ifdef PYTHON3
+#define STATE(m) ((state_t*)PyModule_GetState(m))
+#else
+static state_t global_state = {0,0,0};
+#define STATE(m) &global_state;
+#endif
+ 
+
+static PyTypeObject OutputClass;
+static PyTypeObject PageClass;
+static PyTypeObject DocClass;
+static PyTypeObject FontClass;
+static PyTypeObject GlyphClass;
+static PyTypeObject CharClass;
+static PyTypeObject KDTreeClass;
+static PyTypeObject BitmapClass;
 
 typedef struct {
     PyObject_HEAD
@@ -64,7 +91,38 @@ typedef struct {
     PyObject_HEAD
     gfxdocument_t*doc;
     char*filename;
+    int page_pos;
 } DocObject;
+
+typedef struct {
+    PyObject_HEAD
+    gfxfont_t*gfxfont;
+} FontObject;
+
+typedef struct {
+    PyObject_HEAD
+    FontObject*font;
+    int nr;
+} GlyphObject;
+
+typedef struct {
+    PyObject_HEAD
+    FontObject*font;
+    int nr;
+    gfxmatrix_t matrix;
+    int size;
+    gfxcolor_t color;
+} CharObject;
+
+typedef struct {
+    PyObject_HEAD
+    kdtree_t*kdtree;
+} KDTreeObject;
+
+typedef struct {
+    PyObject_HEAD
+    gfximage_t*image;
+} BitmapObject;
 
 static char* strf(char*format, ...)
 {
@@ -76,7 +134,47 @@ static char* strf(char*format, ...)
     va_end(arglist);
     return strdup(buf);
 }
-#define PY_ERROR(s,args...) (PyErr_SetString(PyExc_Exception, strf(s, ## args)),(PyObject*)NULL)
+static inline PyObject*pystring_fromstring(const char*s)
+{
+#ifdef PYTHON3
+    return PyUnicode_FromString(s);
+#else
+    return PyString_FromString(s);
+#endif
+}
+static inline int pystring_check(PyObject*o)
+{
+#ifdef PYTHON3
+    return PyUnicode_Check(o);
+#else
+    return PyString_Check(o);
+#endif
+}
+static inline PyObject*pyint_fromlong(long l)
+{
+#ifdef PYTHON3
+    return PyLong_FromLong(l);
+#else
+    return PyInt_FromLong(l);
+#endif
+}
+static inline const char*pystring_asstring(PyObject*s)
+{
+#ifdef PYTHON3
+    return PyUnicode_AS_DATA(s);
+#else
+    return PyString_AsString(s);
+#endif
+}
+PyObject*forward_getattr(PyObject*self, char *a)
+{
+    PyObject*o = pystring_fromstring(a);
+    PyObject*ret = PyObject_GenericGetAttr(self, o);
+    Py_DECREF(o);
+    return ret;
+}
+
+#define PY_ERROR(s,args...) (PyErr_SetString(PyExc_Exception, strf(s, ## args)),(void*)NULL)
 #define PY_NONE Py_BuildValue("s", 0)
 
 //---------------------------------------------------------------------
@@ -94,15 +192,19 @@ static PyObject* output_save(PyObject* _self, PyObject* args, PyObject* kwargs)
     OutputObject* self = (OutputObject*)_self;
     char*filename = 0;
     static char *kwlist[] = {"filename", NULL};
+    int ret;
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s", kwlist, &filename))
 	return NULL;
 
+    Py_BEGIN_ALLOW_THREADS
     gfxresult_t*result = self->output_device->finish(self->output_device);
     self->output_device = 0;
-    if(result->save(result, filename) < 0) {
+    ret = result->save(result, filename);
+    result->destroy(result);
+    Py_END_ALLOW_THREADS
+    if(ret < 0) {
 	return PY_ERROR("Couldn't write to %s", filename);
     }
-    result->destroy(result);
     return PY_NONE;
 }
 
@@ -127,7 +229,9 @@ static PyObject* output_startpage(PyObject* _self, PyObject* args, PyObject* kwa
     int width=0, height=0;
     if (!PyArg_ParseTuple(args, "ii", &width, &height))
 	return NULL;
+    Py_BEGIN_ALLOW_THREADS
     self->output_device->startpage(self->output_device, width, height);
+    Py_END_ALLOW_THREADS
     return PY_NONE;
 }
 
@@ -158,12 +262,13 @@ static gfxline_t*toLine(PyObject*_line)
     gfxline_t*last=&first;
     for(t=0;t<num;t++) {
         PyObject*p= PySequence_GetItem(_line, t);
-        if(!PyTuple_Check(p))
+        if(!PyTuple_Check(p)) {
             return PY_ERROR("each point must be a tuple");
+	}
         PyObject*_type = PyTuple_GetItem(p, 0);
-        if(!PyString_Check(_type))
+        if(!pystring_check(_type))
             return PY_ERROR("point tuples must start with a string");
-        char*type = PyString_AsString(_type);
+        const char*type = pystring_asstring(_type);
         int s;
         int size = PyTuple_Size(p);
         for(s=1;s<size;s++) {
@@ -317,7 +422,9 @@ static PyObject* output_endpage(PyObject* _self, PyObject* args, PyObject* kwarg
     OutputObject* self = (OutputObject*)_self;
     if (!PyArg_ParseTuple(args, ""))
 	return NULL;
+    Py_BEGIN_ALLOW_THREADS
     self->output_device->endpage(self->output_device);
+    Py_END_ALLOW_THREADS
     return PY_NONE;
 }
 PyDoc_STRVAR(output_setparameter_doc, \
@@ -341,7 +448,7 @@ PyDoc_STRVAR(f_createSWF_doc, \
 "and bitmap parameters), the resulting SWF might use vector operations\n"
 "and Flash Texts to display the document, or just a single bitmap.\n"
 );
-static PyObject* f_createSWF(PyObject* parent, PyObject* args, PyObject* kwargs)
+static PyObject* f_createSWF(PyObject* module, PyObject* args, PyObject* kwargs)
 {
     static char *kwlist[] = {NULL};
     if (args && !PyArg_ParseTupleAndKeywords(args, kwargs, "", kwlist))
@@ -353,27 +460,6 @@ static PyObject* f_createSWF(PyObject* parent, PyObject* args, PyObject* kwargs)
     return (PyObject*)self;
 }
 
-PyDoc_STRVAR(f_createOCR_doc, \
-"OCR()\n\n"
-"Creates a device which processes documents using OCR (optical\n"
-"character recognition).\n"
-"This is handy for e.g. extracting fulltext from PDF documents\n"
-"which have broken fonts, and where hence the \"PlainText\"\n"
-"device doesn't work.\n"
-);
-static PyObject* f_createOCR(PyObject* parent, PyObject* args, PyObject* kwargs)
-{
-    static char *kwlist[] = {NULL};
-    if (args && !PyArg_ParseTupleAndKeywords(args, kwargs, "", kwlist))
-	return NULL;
-    OutputObject*self = PyObject_New(OutputObject, &OutputClass);
-    
-    self->output_device = (gfxdevice_t*)malloc(sizeof(gfxdevice_t));
-    gfxdevice_ocr_init(self->output_device);
-    return (PyObject*)self;
-}
-
-
 PyDoc_STRVAR(f_createImageList_doc, \
 "ImageList()\n\n"
 "Creates a device which renders documents to bitmaps.\n"
@@ -381,7 +467,7 @@ PyDoc_STRVAR(f_createImageList_doc, \
 "Using save(), you can save the images to a number\n"
 "of files\n"
 );
-static PyObject* f_createImageList(PyObject* parent, PyObject* args, PyObject* kwargs)
+static PyObject* f_createImageList(PyObject* module, PyObject* args, PyObject* kwargs)
 {
     static char *kwlist[] = {NULL};
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "", kwlist))
@@ -399,7 +485,7 @@ PyDoc_STRVAR(f_createPlainText_doc, \
 "by passing it as parameter to page.render().\n"
 "The extracted text can be saved by plaintext.save(filename).\n"
 );
-static PyObject* f_createPlainText(PyObject* parent, PyObject* args, PyObject* kwargs)
+static PyObject* f_createPlainText(PyObject* module, PyObject* args, PyObject* kwargs)
 {
     static char *kwlist[] = {NULL};
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "", kwlist))
@@ -418,7 +504,7 @@ PyDoc_STRVAR(f_createOpenGL_doc, \
 "Can be used for desktop display and debugging.\n"
 "This device is not available on all systems.\n"
 );
-static PyObject* f_createOpenGL(PyObject* parent, PyObject* args, PyObject* kwargs)
+static PyObject* f_createOpenGL(PyObject* module, PyObject* args, PyObject* kwargs)
 {
     static char *kwlist[] = {NULL};
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "", kwlist))
@@ -431,6 +517,77 @@ static PyObject* f_createOpenGL(PyObject* parent, PyObject* args, PyObject* kwar
 }
 #endif
 
+static jmp_buf backjump;
+static int has_backjump = 0;
+
+static PyObject* convert_gfxline(gfxline_t*line)
+{
+    gfxline_t*l;
+    int len = 0, i = 0;
+    l = line;
+    while(l) {l=l->next;len++;}
+    PyObject*list = PyList_New(len);
+    l = line;
+    while(l) {
+	PyObject*point=0;
+	if(l->type == gfx_moveTo) {
+	    point = PyTuple_New(3);
+	    PyTuple_SetItem(point, 0, pystring_fromstring("m"));
+	    PyTuple_SetItem(point, 1, PyFloat_FromDouble(l->x));
+	    PyTuple_SetItem(point, 2, PyFloat_FromDouble(l->y));
+	} else if(l->type == gfx_lineTo) {
+	    point = PyTuple_New(3);
+	    PyTuple_SetItem(point, 0, pystring_fromstring("l"));
+	    PyTuple_SetItem(point, 1, PyFloat_FromDouble(l->x));
+	    PyTuple_SetItem(point, 2, PyFloat_FromDouble(l->y));
+	} else if(l->type == gfx_splineTo) {
+	    point = PyTuple_New(5);
+	    PyTuple_SetItem(point, 0, pystring_fromstring("s"));
+	    PyTuple_SetItem(point, 1, PyFloat_FromDouble(l->x));
+	    PyTuple_SetItem(point, 2, PyFloat_FromDouble(l->y));
+	    PyTuple_SetItem(point, 3, PyFloat_FromDouble(l->sx));
+	    PyTuple_SetItem(point, 4, PyFloat_FromDouble(l->sy));
+	} else {
+	    point = PY_NONE;
+	}
+	PyList_SetItem(list, i, point);
+	l = l->next;
+	i++;
+    }
+    return list;
+}
+static PyObject* convert_matrix(gfxmatrix_t*m)
+{
+    PyObject*columns = PyTuple_New(3);
+    PyObject*column0 = PyTuple_New(2);
+    PyTuple_SetItem(column0, 0, PyFloat_FromDouble(m->m00));
+    PyTuple_SetItem(column0, 1, PyFloat_FromDouble(m->m10));
+    PyTuple_SetItem(columns, 0, column0);
+    PyObject*column1 = PyTuple_New(2);
+    PyTuple_SetItem(column1, 0, PyFloat_FromDouble(m->m01));
+    PyTuple_SetItem(column1, 1, PyFloat_FromDouble(m->m11));
+    PyTuple_SetItem(columns, 1, column1);
+    PyObject*column2 = PyTuple_New(2);
+    PyTuple_SetItem(column2, 0, PyFloat_FromDouble(m->tx));
+    PyTuple_SetItem(column2, 1, PyFloat_FromDouble(m->ty));
+    PyTuple_SetItem(columns, 2, column2);
+    return columns;
+}
+static PyObject* convert_color(gfxcolor_t*col)
+{
+    PyObject*obj = PyTuple_New(4);
+    PyTuple_SetItem(obj, 0, pyint_fromlong(col->a));
+    PyTuple_SetItem(obj, 1, pyint_fromlong(col->r));
+    PyTuple_SetItem(obj, 2, pyint_fromlong(col->g));
+    PyTuple_SetItem(obj, 3, pyint_fromlong(col->b));
+    return obj;
+}
+
+static PyObject* lookup_font(gfxfont_t*font);
+static PyObject* char_new(gfxfont_t*font, int glyphnr, gfxcolor_t*color, gfxmatrix_t*matrix);
+static PyObject* create_bitmap(gfximage_t*img);
+
+static gfxfontlist_t* global_fonts;
 static char callback_python(char*function, gfxdevice_t*dev, const char*format, ...)
 {
     OutputObject*self = (OutputObject*)dev->internal;
@@ -445,63 +602,61 @@ static char callback_python(char*function, gfxdevice_t*dev, const char*format, .
     int pos = 0;
     while(format[pos]) {
         char p = format[pos];
-        if(p=='s') {
-            char*s = va_arg(ap, char*);
-            PyTuple_SetItem(tuple, pos, PyString_FromString(s));
-        } else if(p=='i') {
-            int i = va_arg(ap, int);
-            PyTuple_SetItem(tuple, pos, PyInt_FromLong(i));
-        } else if(p=='d') {
-            int i = va_arg(ap, double);
-            PyTuple_SetItem(tuple, pos, PyFloat_FromDouble(i));
-        } else if(p=='c') {
-            void* ptr = va_arg(ap, void*);
-            gfxcolor_t*col = (gfxcolor_t*)ptr;
-            PyObject*colobj = PyTuple_New(4);
-            PyTuple_SetItem(colobj, 0, PyInt_FromLong(col->a));
-            PyTuple_SetItem(colobj, 1, PyInt_FromLong(col->r));
-            PyTuple_SetItem(colobj, 2, PyInt_FromLong(col->g));
-            PyTuple_SetItem(colobj, 3, PyInt_FromLong(col->b));
-            PyTuple_SetItem(tuple, pos, colobj);
-        } else if(p=='l') {
-            void* ptr = va_arg(ap, void*);
-            gfxline_t*line = (gfxline_t*)ptr;
-            gfxline_t*l;
-            int len = 0, i = 0;
-            l = line;
-            while(l) {l=l->next;len++;}
-            PyObject*list = PyList_New(len);
-            l = line;
-            while(l) {
-                PyObject*point=0;
-                if(l->type == gfx_moveTo) {
-                    point = PyTuple_New(3);
-                    PyTuple_SetItem(point, 0, PyString_FromString("m"));
-                    PyTuple_SetItem(point, 1, PyFloat_FromDouble(l->x));
-                    PyTuple_SetItem(point, 2, PyFloat_FromDouble(l->y));
-                } else if(l->type == gfx_lineTo) {
-                    point = PyTuple_New(3);
-                    PyTuple_SetItem(point, 0, PyString_FromString("l"));
-                    PyTuple_SetItem(point, 1, PyFloat_FromDouble(l->x));
-                    PyTuple_SetItem(point, 2, PyFloat_FromDouble(l->y));
-                } else if(l->type == gfx_splineTo) {
-                    point = PyTuple_New(5);
-                    PyTuple_SetItem(point, 0, PyString_FromString("s"));
-                    PyTuple_SetItem(point, 1, PyFloat_FromDouble(l->x));
-                    PyTuple_SetItem(point, 2, PyFloat_FromDouble(l->y));
-                    PyTuple_SetItem(point, 3, PyFloat_FromDouble(l->sx));
-                    PyTuple_SetItem(point, 4, PyFloat_FromDouble(l->sy));
-                } else {
-                    point = PY_NONE;
-                }
-                PyList_SetItem(list, i, point);
-                l = l->next;
-                i++;
-            }
-            PyTuple_SetItem(tuple, pos, list);
-        } else {
-            PyTuple_SetItem(tuple, pos, PY_NONE);
-        }
+	PyObject*obj = 0;
+	switch(p) {
+	    case 's': {
+		char*s = va_arg(ap, char*);
+		obj = pystring_fromstring(s);
+		break;
+	    }
+	    case 'i': {
+		int i = va_arg(ap, int);
+		obj = pyint_fromlong(i);
+		break;
+	    }
+	    case 'd': {
+		int i = va_arg(ap, double);
+		obj = PyFloat_FromDouble(i);
+		break;
+	    }
+	    case 'c': {
+		void* ptr = va_arg(ap, void*);
+		gfxcolor_t*col = (gfxcolor_t*)ptr;
+		obj = convert_color(col);
+		break;
+	    }
+	    case 'f': {
+		void* ptr = va_arg(ap, void*);
+		obj = lookup_font((gfxfont_t*)ptr);
+		break;
+	    }
+	    case 'l': {
+		void* ptr = va_arg(ap, void*);
+		gfxline_t*line = (gfxline_t*)ptr;
+		obj = convert_gfxline(line);
+		break;
+	    }
+	    case 'I': {
+		void* ptr = va_arg(ap, void*);
+		obj = create_bitmap((gfximage_t*)ptr);
+		break;
+	    }
+	    case 'O': {
+		void* ptr = va_arg(ap, void*);
+		obj = (PyObject*)ptr;
+		break;
+	    }
+	    case 'm': {
+		void* ptr = va_arg(ap, void*);
+		obj = convert_matrix((gfxmatrix_t*)ptr);
+		break;
+	    }
+	    default: {
+		obj = PY_NONE;
+		break;
+	    }
+	}
+        PyTuple_SetItem(tuple, pos, obj);
         pos++;
     }
     va_end(ap);
@@ -510,11 +665,16 @@ static char callback_python(char*function, gfxdevice_t*dev, const char*format, .
         return 0;
     PyErr_Clear();
     PyObject* result = PyObject_CallObject(f, tuple);
+    Py_DECREF(tuple);
 
     if(!result) { 
-        PyErr_Print();
-        PyErr_Clear();
-        return 1;
+	if(!has_backjump) {
+	    PyErr_Print();
+	    PyErr_Clear();
+	    return 1;
+	} else {
+	    longjmp(backjump, 1);
+	}
     } else {
         Py_DECREF(result);
         return 1;
@@ -574,25 +734,35 @@ static void my_addfont(gfxdevice_t*dev, gfxfont_t*font)
 }
 static void my_drawchar(gfxdevice_t*dev, gfxfont_t*font, int glyphnr, gfxcolor_t*color, gfxmatrix_t*matrix)
 {
-    if(!callback_python("drawchar", dev, "ficm", font, glyphnr, color, matrix))
-    {
-        if(!font)
-            return;
-        gfxglyph_t*glyph = &font->glyphs[glyphnr];
-        gfxline_t*line2 = gfxline_clone(glyph->line);
-        gfxline_transform(line2, matrix);
-        my_fill(dev, line2, color);
-        gfxline_free(line2);
-        return;
+    PyMethodObject*obj = (PyMethodObject*)PyObject_GetAttrString(((OutputObject*)(dev->internal))->pyobj, "drawchar");
+    if(!obj) {
+	/* if the device doesn't support chars, try drawing a polygon instead */
+	if(!font)
+	    return;
+	gfxglyph_t*glyph = &font->glyphs[glyphnr];
+	gfxline_t*line2 = gfxline_clone(glyph->line);
+	gfxline_transform(line2, matrix);
+	my_fill(dev, line2, color);
+	gfxline_free(line2);
+	return;
+    }
+    PyFunctionObject*f = (PyFunctionObject*)obj->im_func;
+    PyCodeObject*c = (PyCodeObject*)f->func_code;
+    if(c->co_argcount == 2) {
+	/* new style drawchar method */
+	CharObject*chr = (CharObject*)char_new(font, glyphnr, color, matrix);
+	callback_python("drawchar", dev, "O", chr);
+    } else {
+	callback_python("drawchar", dev, "ficm", font, glyphnr, color, matrix);
     }
 }
-static void my_drawlink(gfxdevice_t*dev, gfxline_t*line, const char*action)
+static void my_drawlink(gfxdevice_t*dev, gfxline_t*line, const char*action, const char*text)
 {
-    callback_python("drawlink", dev, "ls", line, action);
+    callback_python("drawlink", dev, "lss", line, action, text);
 }
 static void my_endpage(gfxdevice_t*dev)
 {
-    callback_python("drawlink", dev, "");
+    callback_python("endpage", dev, "");
 }
 static gfxresult_t* my_finish(gfxdevice_t*dev)
 {
@@ -600,33 +770,9 @@ static gfxresult_t* my_finish(gfxdevice_t*dev)
     return 0;
 }
 
-
-PyDoc_STRVAR(f_createPassThrough_doc, \
-"PassThrough(device)\n\n"
-"Creates a PassThrough device, which can be used as parameter in calls\n"
-"to page.render().\n"
-"device needs to be a class implementing at least the following functions:\n\n"
-"setparameter(key,value)\n"
-"startclip(outline)\n"
-"endclip()\n"
-"stroke(outline, width, color, capstyle, jointstyle, miterLimit)\n"
-"fill(outline, color)\n"
-"fillbitmap(outline, image, matrix, colortransform)\n"
-"fillgradient(outline, gradient, gradienttype, matrix)\n"
-"addfont(font)\n"
-"drawchar(font, glyph, color, matrix)\n"
-"drawlink(outline, url)\n"
-"If any of these functions are not defined, a error message will be printed,\n"
-"however the rendering process will *not* be aborted.\n"
-);
-static PyObject* f_createPassThrough(PyObject* parent, PyObject* args, PyObject* kwargs)
+PyObject* passthrough_create(PyObject*obj)
 {
-    static char *kwlist[] = {"device", NULL};
-    PyObject*obj;
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O", kwlist, &obj))
-	return NULL;
     OutputObject*self = PyObject_New(OutputObject, &OutputClass);
-   
     self->pyobj = obj;
     Py_INCREF(obj);
     self->output_device = (gfxdevice_t*)malloc(sizeof(gfxdevice_t));
@@ -651,16 +797,43 @@ static PyObject* f_createPassThrough(PyObject* parent, PyObject* args, PyObject*
     return (PyObject*)self;
 }
 
+PyDoc_STRVAR(f_createPassThrough_doc, \
+"PassThrough(device)\n\n"
+"Creates a PassThrough device, which can be used as parameter in calls\n"
+"to page.render().\n"
+"device needs to be a class implementing at least the following functions:\n\n"
+"setparameter(key,value)\n"
+"startclip(outline)\n"
+"endclip()\n"
+"stroke(outline, width, color, capstyle, jointstyle, miterLimit)\n"
+"fill(outline, color)\n"
+"fillbitmap(outline, image, matrix, colortransform)\n"
+"fillgradient(outline, gradient, gradienttype, matrix)\n"
+"addfont(font)\n"
+"drawchar(font, glyph, color, matrix)\n"
+"drawlink(outline, url)\n"
+"If any of these functions are not defined, a error message will be printed,\n"
+"however the rendering process will *not* be aborted.\n"
+);
+static PyObject* f_createPassThrough(PyObject* module, PyObject* args, PyObject* kwargs)
+{
+    static char *kwlist[] = {"device", NULL};
+    PyObject*obj;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O", kwlist, &obj))
+	return NULL;
+    return passthrough_create(obj);
+}
+
 static PyMethodDef output_methods[] =
 {
     /* Output functions */
-    {"save", (PyCFunction)output_save, METH_KEYWORDS, output_save_doc},
-    {"startpage", (PyCFunction)output_startpage, METH_KEYWORDS, output_startpage_doc},
-    {"fill", (PyCFunction)output_fill, METH_KEYWORDS, output_fill_doc},
-    {"fillbitmap", (PyCFunction)output_fillbitmap, METH_KEYWORDS, output_fillbitmap_doc},
-    {"stroke", (PyCFunction)output_stroke, METH_KEYWORDS, output_stroke_doc},
-    {"endpage", (PyCFunction)output_endpage, METH_KEYWORDS, output_endpage_doc},
-    {"setparameter", (PyCFunction)output_setparameter, METH_KEYWORDS, output_setparameter_doc},
+    {"save", (PyCFunction)output_save, M_FLAGS, output_save_doc},
+    {"startpage", (PyCFunction)output_startpage, M_FLAGS, output_startpage_doc},
+    {"fill", (PyCFunction)output_fill, M_FLAGS, output_fill_doc},
+    {"fillbitmap", (PyCFunction)output_fillbitmap, M_FLAGS, output_fillbitmap_doc},
+    {"stroke", (PyCFunction)output_stroke, M_FLAGS, output_stroke_doc},
+    {"endpage", (PyCFunction)output_endpage, M_FLAGS, output_endpage_doc},
+    {"setparameter", (PyCFunction)output_setparameter, M_FLAGS, output_setparameter_doc},
     {0,0,0,0}
 };
 
@@ -682,36 +855,225 @@ static PyObject* output_getattr(PyObject * _self, char* a)
     OutputObject*self = (OutputObject*)_self;
    
 /*    if(!strcmp(a, "x1")) {
-        return PyInt_FromLong(self->output_device->x1);
+        return pyint_fromlong(self->output_device->x1);
     } else if(!strcmp(a, "y1")) {
-        return PyInt_FromLong(self->output_device->y1);
+        return pyint_fromlong(self->output_device->y1);
     } else if(!strcmp(a, "x2")) {
-        return PyInt_FromLong(self->output_device->x2);
+        return pyint_fromlong(self->output_device->x2);
     } else if(!strcmp(a, "y2")) {
-        return PyInt_FromLong(self->output_device->y2);
+        return pyint_fromlong(self->output_device->y2);
     }*/
     
-    return Py_FindMethod(output_methods, _self, a);
+    return forward_getattr(_self, a);
 }
 static int output_setattr(PyObject * _self, char* a, PyObject * o) 
 {
     OutputObject*self = (OutputObject*)_self;
-    if(!PyString_Check(o))
+    if(!pystring_check(o))
         return -1;
-    char*value = PyString_AsString(o);
+    const char*value = pystring_asstring(o);
     self->output_device->setparameter(self->output_device, a, value);
     return -1;
 }
 static int output_print(PyObject * _self, FILE *fi, int flags)
 {
     OutputObject*self = (OutputObject*)_self;
-    fprintf(fi, "%08x(%d)", (int)_self, _self?_self->ob_refcnt:0);
+    fprintf(fi, "<output object at %p(%d)>", _self, _self?_self->ob_refcnt:0);
     return 0;
 }
 
 //---------------------------------------------------------------------
-staticforward PyObject* page_render(PyObject* _self, PyObject* args, PyObject* kwargs);
-staticforward PyObject* page_asImage(PyObject* _self, PyObject* args, PyObject* kwargs);
+static PyMethodDef glyph_methods[];
+
+static void glyph_dealloc(PyObject* _self) {
+    GlyphObject* self = (GlyphObject*)_self;
+    Py_DECREF(self->font);
+    PyObject_Del(self);
+}
+static PyObject* glyph_getattr(PyObject * _self, char* a)
+{
+    GlyphObject*self = (GlyphObject*)_self;
+    FontObject*font = self->font;
+    if(!strcmp(a, "unicode")) {
+        return pyint_fromlong(font->gfxfont->glyphs[self->nr].unicode);
+    } else if(!strcmp(a, "advance")) {
+        return PyFloat_FromDouble(font->gfxfont->glyphs[self->nr].advance);
+    } else if(!strcmp(a, "polygon")) {
+        return convert_gfxline(font->gfxfont->glyphs[self->nr].line);
+    }
+    return forward_getattr(_self, a);
+}
+static int glyph_setattr(PyObject * self, char* a, PyObject * o) {
+    return -1;
+}
+static PyObject* glyph_new(FontObject*font, int nr) {
+    GlyphObject*glyph = PyObject_New(GlyphObject, &GlyphClass);
+    glyph->font = font;
+    Py_INCREF(glyph->font);
+    glyph->nr = nr;
+    return (PyObject*)glyph;
+}
+static int glyph_print(PyObject * _self, FILE *fi, int flags)
+{
+    GlyphObject*self = (GlyphObject*)_self;
+    fprintf(fi, "<glyph object at %p(%d)>", _self, _self?_self->ob_refcnt:0);
+    return 0;
+}
+static PyMethodDef glyph_methods[] =
+{
+    /* Glyph functions */
+    {0,0,0,0}
+};
+
+//---------------------------------------------------------------------
+static PyMethodDef font_methods[];
+
+static void font_dealloc(PyObject* _self) {
+    FontObject* self = (FontObject*)_self; 
+    PyObject_Del(self);
+}
+static PyObject* font_new(gfxfont_t*gfxfont)
+{
+    FontObject*font = PyObject_New(FontObject, &FontClass);
+    font->gfxfont = gfxfont;
+    return (PyObject*)font;
+}
+static gfxfontlist_t* global_fonts = 0;
+
+static PyObject* lookup_font(gfxfont_t*font)
+{
+    PyObject*fontobj = gfxfontlist_getuserdata(global_fonts, font->id);
+    if(!fontobj) {
+	fontobj = font_new(font);
+	global_fonts = gfxfontlist_addfont2(global_fonts, font, fontobj);
+    }
+    Py_INCREF(fontobj);
+    return fontobj;
+}
+static PyObject* font_getattr(PyObject * _self, char* a)
+{
+    FontObject*self = (FontObject*)_self;
+    if(!strcmp(a, "num_glyphs")) {
+        return pyint_fromlong(self->gfxfont->num_glyphs);
+    } else if(!strcmp(a, "name")) {
+        return pystring_fromstring(self->gfxfont->id);
+    }
+    return forward_getattr(_self, a);
+}
+static int font_setattr(PyObject * self, char* a, PyObject * o) {
+    return -1;
+}
+static PyObject* font_glyph(PyObject * _self, PyObject* args, PyObject* kwargs) {
+    FontObject*self = (FontObject*)_self;
+    static char *kwlist[] = {"nr", NULL};
+    static long nr = 0;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i", kwlist, &nr))
+	return NULL;
+    return glyph_new(self, nr);
+}
+static int font_print(PyObject * _self, FILE *fi, int flags)
+{
+    FontObject*self = (FontObject*)_self;
+    fprintf(fi, "<font object %s at %p(%d)>", self->gfxfont->id, _self, _self?_self->ob_refcnt:0);
+    return 0;
+}
+static PyMethodDef font_methods[] =
+{
+    /* Font functions */
+    {"get_glyph", (PyCFunction)font_glyph, M_FLAGS, "get a glyph from this font"},
+    {0,0,0,0}
+};
+
+//---------------------------------------------------------------------
+static PyMethodDef char_methods[];
+
+static void char_dealloc(PyObject* _self) {
+    CharObject* self = (CharObject*)_self;
+    Py_DECREF(self->font);
+    PyObject_Del(self);
+}
+static PyObject* char_getattr(PyObject * _self, char* a)
+{
+    CharObject*self = (CharObject*)_self;
+    FontObject*font = self->font;
+    gfxglyph_t*glyph = &font->gfxfont->glyphs[self->nr];
+    if(!strcmp(a, "unicode")) {
+        return pyint_fromlong(glyph->unicode);
+    } else if(!strcmp(a, "advance")) {
+        return PyFloat_FromDouble((self->matrix.m00 * glyph->advance));
+    } else if(!strcmp(a, "matrix")) {
+        return convert_matrix(&self->matrix);
+    } else if(!strcmp(a, "color")) {
+        return convert_color(&self->color);
+    } else if(!strcmp(a, "size")) {
+        return pyint_fromlong(self->size);
+    } else if(!strcmp(a, "glyph")) {
+        return glyph_new(font, self->nr);
+    } else if(!strcmp(a, "font")) {
+        Py_INCREF(font);
+        return (PyObject*)font;
+    } else if(!strcmp(a, "x")) {
+    	int x = self->matrix.tx;
+        return pyint_fromlong(x);
+    } else if(!strcmp(a, "y")) {
+    	int y = self->matrix.ty;
+        return pyint_fromlong(y);
+    }
+    
+    int lsb = 0; //left side bearing
+    int x1 = self->matrix.tx - (self->matrix.m00) * lsb;
+    int y1 = self->matrix.ty - (-self->matrix.m11) * font->gfxfont->ascent;
+    int x2 = self->matrix.tx + (self->matrix.m00) * font->gfxfont->glyphs[self->nr].advance;
+    int y2 = self->matrix.ty + (-self->matrix.m11) * font->gfxfont->descent;
+    if(!strcmp(a, "bbox")) {
+        PyObject*bbox = PyTuple_New(4);
+        PyTuple_SetItem(bbox, 0, pyint_fromlong(x1));
+        PyTuple_SetItem(bbox, 1, pyint_fromlong(y1));
+        PyTuple_SetItem(bbox, 2, pyint_fromlong(x2));
+        PyTuple_SetItem(bbox, 3, pyint_fromlong(y2));
+        return bbox;
+    } else if(!strcmp(a, "x1")) {
+        return pyint_fromlong(x1);
+    } else if(!strcmp(a, "y1")) {
+        return pyint_fromlong(y1);
+    } else if(!strcmp(a, "x2")) {
+        return pyint_fromlong(x2);
+    } else if(!strcmp(a, "y2")) {
+        return pyint_fromlong(y2);
+    }
+    return forward_getattr(_self, a);
+}
+static int char_setattr(PyObject * self, char* a, PyObject * o) {
+    return -1;
+}
+static PyObject* char_new(gfxfont_t*font, int glyphnr, gfxcolor_t*color, gfxmatrix_t*matrix) 
+{
+    FontObject*fontobj = (FontObject*)lookup_font(font);
+    CharObject*chr = PyObject_New(CharObject, &CharClass);
+    chr->font = fontobj;
+    Py_INCREF(fontobj);
+    chr->nr = glyphnr;
+    chr->matrix = *matrix;
+    chr->size = ceil(1024*fabs(matrix->m00 + matrix->m10)); //horizontal size
+    chr->color = *color;
+    return (PyObject*)chr;
+    return 0;
+}
+static int char_print(PyObject * _self, FILE *fi, int flags)
+{
+    CharObject*self = (CharObject*)_self;
+    fprintf(fi, "<char object at %p(%d)>", _self, _self?_self->ob_refcnt:0);
+    return 0;
+}
+static PyMethodDef char_methods[] =
+{
+    /* char functions */
+    {0,0,0,0}
+};
+
+//---------------------------------------------------------------------
+static PyObject* page_render(PyObject* _self, PyObject* args, PyObject* kwargs);
+static PyObject* page_asImage(PyObject* _self, PyObject* args, PyObject* kwargs);
 
 PyDoc_STRVAR(page_render_doc, \
 "render(output, move=(0,0), clip=None)\n\n"
@@ -721,6 +1083,8 @@ PyDoc_STRVAR(page_render_doc, \
 "The page may be shifted to a given position using the move parameter,\n"
 "and may also be clipped to a specific size using the clip parameter.\n"
 "The clipping operation is applied after the move operation.\n"
+"If you don't need to specify custom page sizes or clippings, use\n"
+"page.draw instead.\n"
 );
 static PyObject* page_render(PyObject* _self, PyObject* args, PyObject* kwargs)
 {
@@ -747,10 +1111,53 @@ static PyObject* page_render(PyObject* _self, PyObject* args, PyObject* kwargs)
 	    return NULL;
     }
 
+    Py_BEGIN_ALLOW_THREADS
     if(x|y|cx1|cx2|cy1|cy2)
         self->page->rendersection(self->page, output->output_device,x,y,cx1,cy1,cx2,cy2);
     else
         self->page->render(self->page, output->output_device);
+    Py_END_ALLOW_THREADS
+    return PY_NONE;
+}
+
+PyDoc_STRVAR(page_draw_doc, \
+"draw(output)\n\n"
+"Renders a page to the rendering backend specified by the output\n"
+"parameter, with the default for page width and height.\n"
+);
+static PyObject* page_draw(PyObject* _self, PyObject* args, PyObject* kwargs)
+{
+    PageObject* self = (PageObject*)_self; 
+    static char *kwlist[] = {"dev", NULL};
+    PyObject*output = 0;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O", kwlist, &output))
+	return NULL;
+
+    PyObject*passthrough = 0;
+    if(output->ob_type != &OutputClass) {
+	passthrough = passthrough_create(output);
+	output = passthrough;
+    }
+    gfxdevice_t*device = ((OutputObject*)passthrough)->output_device;
+
+    if(setjmp(backjump)) {
+	/* exception in the code below*/
+	has_backjump = 0;
+	//FIXME: this clear the exception, for some reason
+	//if(passthrough) {
+	//    Py_DECREF(passthrough);
+	//}
+	return 0;
+    }
+    has_backjump = 1;
+    device->startpage(device, self->page->width, self->page->height);
+    self->page->render(self->page, device);
+    device->endpage(device);
+    has_backjump = 0;
+
+    if(passthrough) {
+	Py_DECREF(passthrough);
+    }
     return PY_NONE;
 }
 
@@ -765,18 +1172,24 @@ static PyObject* page_asImage(PyObject* _self, PyObject* args, PyObject* kwargs)
 {
     PageObject* self = (PageObject*)_self; 
     
-    static char *kwlist[] = {"width", "height", NULL};
+    static char *kwlist[] = {"width", "height", "allow_threads", NULL};
     int width=0,height=0;
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ii", kwlist, &width, &height))
+    int allow_threads=0;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ii|i", kwlist, &width, &height, &allow_threads))
 	return NULL;
 
     if(!width || !height) {
 	return PY_ERROR("invalid dimensions: %dx%d", width,height);
     }
 
+    PyThreadState *_save=0;
+    if (allow_threads) {
+        Py_UNBLOCK_THREADS
+    }
     gfxdevice_t dev1,dev2;
     gfxdevice_render_init(&dev1);
     dev1.setparameter(&dev1, "antialise", "2");
+    dev1.setparameter(&dev1, "fillwhite", "1");
     gfxdevice_rescale_init(&dev2, &dev1, width, height, 0);
     dev2.startpage(&dev2, self->page->width, self->page->height);
     self->page->render(self->page, &dev2);
@@ -784,22 +1197,37 @@ static PyObject* page_asImage(PyObject* _self, PyObject* args, PyObject* kwargs)
     gfxresult_t*result = dev2.finish(&dev2);
     gfximage_t*img = (gfximage_t*)result->get(result,"page0");
     int l = img->width*img->height;
-    unsigned char*data = (unsigned char*)malloc(img->width*img->height*3);
+    int ll = l*3;
+    unsigned char*data = (unsigned char*)malloc(ll);
     int s,t;
     for(t=0,s=0;t<l;s+=3,t++) {
 	data[s+0] = img->data[t].r;
 	data[s+1] = img->data[t].g;
 	data[s+2] = img->data[t].b;
     }
-    result->destroy(result);
-    return PyString_FromStringAndSize((char*)data,img->width*img->height*3);
+    result->destroy(result); result=0;
+    free(img->data); free(img);
+
+    PyObject *ret;
+#ifdef PYTHON3
+    ret = PyByteArray_FromStringAndSize((char*)data,ll);
+#else
+    ret = PyString_FromStringAndSize((char*)data,ll);
+#endif
+    free(data);
+
+    if (allow_threads) {
+        Py_BLOCK_THREADS
+    }
+    return ret;
 }
 
 static PyMethodDef page_methods[] =
 {
     /* Page functions */
-    {"render", (PyCFunction)page_render, METH_KEYWORDS, page_render_doc},
-    {"asImage", (PyCFunction)page_asImage, METH_KEYWORDS, page_asImage_doc},
+    {"render", (PyCFunction)page_render, M_FLAGS, page_render_doc},
+    {"draw", (PyCFunction)page_draw, M_FLAGS, page_draw_doc},
+    {"asImage", (PyCFunction)page_asImage, M_FLAGS, page_asImage_doc},
     {0,0,0,0}
 };
 static void page_dealloc(PyObject* _self) {
@@ -826,13 +1254,13 @@ static PyObject* page_getattr(PyObject * _self, char* a)
 	Py_INCREF(self->parent);
         return self->parent;
     } if(!strcmp(a, "nr")) {
-        return PyInt_FromLong(self->nr);
+        return pyint_fromlong(self->nr);
     } else if(!strcmp(a, "width")) {
-        return PyInt_FromLong(self->page->width);
+        return pyint_fromlong(self->page->width);
     } else if(!strcmp(a, "height")) {
-        return PyInt_FromLong(self->page->height);
+        return pyint_fromlong(self->page->height);
     }
-    return Py_FindMethod(page_methods, _self, a);
+    return forward_getattr(_self, a);
 }
 
 static int page_setattr(PyObject * self, char* a, PyObject * o) {
@@ -841,7 +1269,7 @@ static int page_setattr(PyObject * self, char* a, PyObject * o) {
 static int page_print(PyObject * _self, FILE *fi, int flags)
 {
     PageObject*self = (PageObject*)_self;
-    fprintf(fi, "%08x(%d)", (int)_self, _self?_self->ob_refcnt:0);
+    fprintf(fi, "<page object at %p(%d)>", _self, _self?_self->ob_refcnt:0);
     return 0;
 }
 
@@ -857,6 +1285,20 @@ PyDoc_STRVAR(doc_getPage_doc,
 "You can find out how many pages a document contains by querying\n"
 "its pages field (doc.pages)\n"
 );
+static PyObject*page_new(DocObject*doc, int pagenr)
+{
+    PageObject*page = PyObject_New(PageObject, &PageClass);
+    page->page = doc->doc->getpage(doc->doc, pagenr);
+    page->nr = pagenr;
+    page->parent = (PyObject*)doc;
+    Py_INCREF(page->parent);
+    if(!page->page) {
+        PyObject_Del(page);
+        return PY_ERROR("Couldn't extract page %d", pagenr);
+    }
+    return (PyObject*)page;
+}
+
 static PyObject* doc_getPage(PyObject* _self, PyObject* args, PyObject* kwargs)
 {
     DocObject* self = (DocObject*)_self;
@@ -865,18 +1307,24 @@ static PyObject* doc_getPage(PyObject* _self, PyObject* args, PyObject* kwargs)
     int pagenr = 0;
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i", kwlist, &pagenr))
 	return NULL;
-
-    PageObject*page = PyObject_New(PageObject, &PageClass);
-    page->page = self->doc->getpage(self->doc, pagenr);
-    page->nr = pagenr;
-    page->parent = _self;
-    Py_INCREF(page->parent);
-    if(!page->page) {
-        PyObject_Del(page);
-        return PY_ERROR("Couldn't extract page %d", pagenr);
-    }
-    return (PyObject*)page;
+    return page_new(self, pagenr);
 }
+static PyObject* doc_getiter(PyObject* _self)
+{
+    DocObject* self = (DocObject*)_self;
+    self->page_pos = 1;
+    Py_INCREF(self);
+    return (PyObject*)self;
+}
+static PyObject* doc_iternext(PyObject* _self)
+{
+    DocObject* self = (DocObject*)_self;
+    if(self->page_pos > self->doc->num_pages) {
+	return NULL;
+    }
+    return page_new(self, self->page_pos++);
+}
+
 
 PyDoc_STRVAR(doc_getInfo_doc,
 "getInfo(key)\n\n"
@@ -899,7 +1347,7 @@ static PyObject* doc_getInfo(PyObject* _self, PyObject* args, PyObject* kwargs)
 	return NULL;
 
     char*s = self->doc->getinfo(self->doc, key);
-    return PyString_FromString(s);
+    return pystring_fromstring(s);
 }
 
 PyDoc_STRVAR(doc_setparameter_doc,
@@ -918,7 +1366,7 @@ static PyObject* doc_setparameter(PyObject* _self, PyObject* args, PyObject* kwa
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ss", kwlist, &key,&value))
 	return NULL;
 
-    self->doc->set_parameter(self->doc, key, value);
+    self->doc->setparameter(self->doc, key, value);
     return PY_NONE;
 }
 
@@ -941,7 +1389,7 @@ PyDoc_STRVAR(f_open_doc,
 "Notice that for image files, the only supported file formats right now\n"
 "are jpeg and png.\n"
 );
-static PyObject* f_open(PyObject* parent, PyObject* args, PyObject* kwargs)
+static PyObject* f_open(PyObject* module, PyObject* args, PyObject* kwargs)
 {
     static char *kwlist[] = {"type", "filename", NULL};
     char*filename=0;
@@ -975,12 +1423,22 @@ static PyObject* f_open(PyObject* parent, PyObject* args, PyObject* kwargs)
 	}
     }
    
-    if(!strcmp(type,"pdf"))
-	self->doc = pdfdriver->open(pdfdriver,filename);
-    else if(!strcmp(type, "image") || !strcmp(type, "img"))  
-	self->doc = imagedriver->open(imagedriver, filename);
-    else if(!strcmp(type, "swf") || !strcmp(type, "SWF"))
-	self->doc = swfdriver->open(imagedriver, filename);
+    state_t*state = STATE(module);
+    if(!strcmp(type,"pdf")) {
+        Py_BEGIN_ALLOW_THREADS
+        self->doc = state->pdfdriver->open(state->pdfdriver,filename);
+        Py_END_ALLOW_THREADS
+    }
+    else if(!strcmp(type, "image") || !strcmp(type, "img")) {
+        Py_BEGIN_ALLOW_THREADS
+        self->doc = state->imagedriver->open(state->imagedriver, filename);
+        Py_END_ALLOW_THREADS
+    }
+    else if(!strcmp(type, "swf") || !strcmp(type, "SWF")) {
+        Py_BEGIN_ALLOW_THREADS
+        self->doc = state->swfdriver->open(state->imagedriver, filename);
+        Py_END_ALLOW_THREADS
+    }
     else
 	return PY_ERROR("Unknown type %s", type);
 
@@ -1016,12 +1474,12 @@ static PyObject* doc_getattr(PyObject * _self, char* a)
 {
     DocObject*self = (DocObject*)_self;
     if(!strcmp(a, "pages")) {
-        return PyInt_FromLong(self->doc->num_pages);
+        return pyint_fromlong(self->doc->num_pages);
     }
     if(!strcmp(a, "filename")) {
-        return PyString_FromString(self->filename);
+        return pystring_fromstring(self->filename);
     }
-    return Py_FindMethod(doc_methods, _self, a);
+    return forward_getattr(_self, a);
 }
 static int doc_setattr(PyObject * self, char* a, PyObject * o) {
     return -1;
@@ -1029,11 +1487,179 @@ static int doc_setattr(PyObject * self, char* a, PyObject * o) {
 static int doc_print(PyObject * _self, FILE *fi, int flags)
 {
     DocObject*self = (DocObject*)_self;
-    fprintf(fi, "%08x(%d)", (int)_self, _self?_self->ob_refcnt:0);
+    fprintf(fi, "<doc object at %p(%d)>", _self, _self?_self->ob_refcnt:0);
     return 0;
 }
 
 //---------------------------------------------------------------------
+PyDoc_STRVAR(f_createKDTree_doc, \
+"KDTree()\n\n"
+"Creates a KDTree, which can be used to store bounding boxes\n"
+);
+static PyObject* f_createKDTree(PyObject* module, PyObject* args, PyObject* kwargs)
+{
+    static char *kwlist[] = {NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "", kwlist))
+	return NULL;
+    KDTreeObject*self = PyObject_New(KDTreeObject, &KDTreeClass);
+    self->kdtree = kdtree_new();
+    return (PyObject*)self;
+}
+static void gfx_kdtree_dealloc(PyObject* _self) {
+    KDTreeObject* self = (KDTreeObject*)_self;
+    /* FIXME: we still need to Py_DECREF all PyObjects in the tree */
+    kdtree_destroy(self->kdtree);
+    PyObject_Del(self);
+}
+static PyObject* gfx_kdtree_getattr(PyObject * _self, char* a)
+{
+    KDTreeObject*self = (KDTreeObject*)_self;
+    return forward_getattr(_self, a);
+}
+static int gfx_kdtree_setattr(PyObject * self, char* a, PyObject * o) {
+    return -1;
+}
+static int gfx_kdtree_print(PyObject * _self, FILE *fi, int flags)
+{
+    KDTreeObject*self = (KDTreeObject*)_self;
+    fprintf(fi, "<kdtree object at %p(%d)>", _self, _self?_self->ob_refcnt:0);
+    return 0;
+}
+PyDoc_STRVAR(gfx_kdtree_add_box_doc,
+"put(bbox, data)\n\n"
+"Add a rectangular area to the tree. All queries within that area\n"
+"will subsequently return 'data'\n"
+);
+static PyObject* gfx_kdtree_add_box(PyObject* _self, PyObject* args, PyObject* kwargs)
+{
+    KDTreeObject* self = (KDTreeObject*)_self;
+
+    static char *kwlist[] = {"bbox", "data", NULL};
+    int x1=0,y1=0,x2=0,y2=0;
+    PyObject*value=0;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "(iiii)O", kwlist, &x1, &y1, &x2, &y2, &value))
+	return NULL;
+    
+    kdtree_add_box(self->kdtree, x1,y1,x2,y2, value);
+    Py_INCREF(value);
+
+    return PY_NONE;
+}
+
+PyDoc_STRVAR(gfx_kdtree_find_doc,
+"find(x,y)\n\n"
+"Look for a coordinate in the kdtree. It will return last inserted object covering that position, or None.\n"
+);
+static PyObject* gfx_kdtree_find(PyObject* _self, PyObject* args, PyObject* kwargs)
+{
+    KDTreeObject* self = (KDTreeObject*)_self;
+
+    static char *kwlist[] = {"x", "y", NULL};
+    int x=0,y=0;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ii", kwlist, &x, &y))
+	return NULL;
+    PyObject*value = (PyObject*)kdtree_find(self->kdtree, x,y);
+    if(!value) {
+        return PY_NONE;
+    } else {
+        Py_INCREF(value);
+        return value;
+    }
+}
+
+static PyMethodDef gfx_kdtree_methods[] =
+{
+    {"add_box", (PyCFunction)gfx_kdtree_add_box, METH_KEYWORDS, gfx_kdtree_add_box_doc},
+    {"find", (PyCFunction)gfx_kdtree_find, METH_KEYWORDS, gfx_kdtree_find_doc},
+    {0,0,0,0}
+};
+
+//---------------------------------------------------------------------
+PyDoc_STRVAR(f_createBitmap_doc, \
+"Bitmap()\n\n"
+"Creates a Bitmap, which can be used to store bounding boxes\n"
+);
+static PyObject* create_bitmap(gfximage_t*img)
+{
+    BitmapObject*self = PyObject_New(BitmapObject, &BitmapClass);
+    self->image = malloc(sizeof(gfximage_t));
+    self->image->data = malloc(sizeof(gfxcolor_t)*img->width*img->height);
+    memcpy(self->image->data, img->data, sizeof(gfxcolor_t)*img->width*img->height);
+    self->image->width = img->width;
+    self->image->height = img->height;
+    return (PyObject*)self;
+}
+static void gfx_bitmap_dealloc(PyObject* _self) {
+    BitmapObject* self = (BitmapObject*)_self;
+    free(self->image->data);
+    free(self->image);
+    PyObject_Del(self);
+}
+static PyObject* gfx_bitmap_getattr(PyObject * _self, char* a)
+{
+    BitmapObject*self = (BitmapObject*)_self;
+    if(!strcmp(a, "width")) {
+        return pyint_fromlong(self->image->width);
+    } else if(!strcmp(a, "height")) {
+        return pyint_fromlong(self->image->height);
+    }
+    return forward_getattr(_self, a);
+}
+static int gfx_bitmap_setattr(PyObject * self, char* a, PyObject * o) {
+    return -1;
+}
+PyDoc_STRVAR(gfx_bitmap_save_png_doc,
+"save_jpeg(filename, quality)\n\n"
+"Save bitmap to a png file.\n"
+);
+static PyObject* gfx_bitmap_save_png(PyObject* _self, PyObject* args, PyObject* kwargs)
+{
+    ImageObject* self = (ImageObject*)_self;
+    static char *kwlist[] = {"filename", NULL};
+    char*filename=0;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s", kwlist, &filename))
+	return NULL;
+    gfximage_save_png_quick(self->image, filename);
+    return PY_NONE;
+}
+PyDoc_STRVAR(gfx_bitmap_save_jpeg_doc,
+"save_jpeg(filename, quality)\n\n"
+"Save bitmap to a jpeg file. The quality parameter is optional.\n"
+);
+static PyObject* gfx_bitmap_save_jpeg(PyObject* _self, PyObject* args, PyObject* kwargs)
+{
+    ImageObject* self = (ImageObject*)_self;
+    static char *kwlist[] = {"filename", "quality", NULL};
+    char*filename=0;
+    int quality=95;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|i", kwlist, &filename, &quality))
+	return NULL;
+    gfximage_save_jpeg(self->image, filename, quality);
+    return PY_NONE;
+}
+static int gfx_bitmap_print(PyObject * _self, FILE *fi, int flags)
+{
+    BitmapObject*self = (BitmapObject*)_self;
+    fprintf(fi, "<bitmap object at %p(%d)>", _self, _self?_self->ob_refcnt:0);
+    return 0;
+}
+static PyMethodDef gfx_bitmap_methods[] =
+{
+    {"save_png", (PyCFunction)gfx_bitmap_save_png, METH_KEYWORDS, gfx_bitmap_save_png_doc},
+    {"save_jpeg", (PyCFunction)gfx_bitmap_save_jpeg, METH_KEYWORDS, gfx_bitmap_save_jpeg_doc},
+    {0,0,0,0}
+};
+
+//---------------------------------------------------------------------
+
+#ifndef PYTHON3
+#define PYTHON23_HEAD_INIT \
+    PyObject_HEAD_INIT(NULL) \
+    0,
+#else
+#define PYTHON23_HEAD_INIT \
+    PyVarObject_HEAD_INIT(&PyType_Type, 0)
+#endif
 
 PyDoc_STRVAR(output_doc,
 "An Output object can be used as parameter to the render()\n"
@@ -1045,8 +1671,7 @@ PyDoc_STRVAR(output_doc,
 );
 static PyTypeObject OutputClass =
 {
-    PyObject_HEAD_INIT(NULL)
-    0,
+    PYTHON23_HEAD_INIT
     tp_name: "gfx.Output",
     tp_basicsize: sizeof(OutputObject),
     tp_itemsize: 0,
@@ -1065,8 +1690,7 @@ PyDoc_STRVAR(page_doc,
 );
 static PyTypeObject PageClass =
 {
-    PyObject_HEAD_INIT(NULL)
-    0,
+    PYTHON23_HEAD_INIT
     tp_name: "gfx.Page",
     tp_basicsize: sizeof(PageObject),
     tp_itemsize: 0,
@@ -1086,18 +1710,109 @@ PyDoc_STRVAR(doc_doc,
 );
 static PyTypeObject DocClass =
 {
-    PyObject_HEAD_INIT(NULL)
-    0,
+    PYTHON23_HEAD_INIT
     tp_name: "gfx.Doc",
     tp_basicsize: sizeof(DocObject),
     tp_itemsize: 0,
     tp_dealloc: doc_dealloc,
+
     tp_print: doc_print,
     tp_getattr: doc_getattr,
     tp_setattr: doc_setattr,
     tp_doc: doc_doc,
     tp_methods: doc_methods,
+	
+    tp_iter: doc_getiter,
+    tp_iternext: doc_iternext,
+
+#ifndef PYTHON3
+    tp_flags: Py_TPFLAGS_HAVE_ITER,
+#endif
 };
+PyDoc_STRVAR(font_doc,
+"A font is a list of glyphs\n"
+);
+static PyTypeObject FontClass =
+{
+    PYTHON23_HEAD_INIT
+    tp_name: "gfx.Font",
+    tp_basicsize: sizeof(FontObject),
+    tp_itemsize: 0,
+    tp_dealloc: font_dealloc,
+    tp_print: font_print,
+    tp_getattr: font_getattr,
+    tp_setattr: font_setattr,
+    tp_doc: font_doc,
+    tp_methods: font_methods,
+};
+PyDoc_STRVAR(glyph_doc,
+"A glyph is a polygon and a unicode index\n"
+);
+static PyTypeObject GlyphClass =
+{
+    PYTHON23_HEAD_INIT
+    tp_name: "gfx.Glyph",
+    tp_basicsize: sizeof(GlyphObject),
+    tp_itemsize: 0,
+    tp_dealloc: glyph_dealloc,
+    tp_print: glyph_print,
+    tp_getattr: glyph_getattr,
+    tp_setattr: glyph_setattr,
+    tp_doc: glyph_doc,
+    tp_methods: glyph_methods,
+};
+PyDoc_STRVAR(char_doc,
+"A char is a glyph at a given position (in a given color)\n"
+);
+static PyTypeObject CharClass =
+{
+    PYTHON23_HEAD_INIT
+    tp_name: "gfx.Char",
+    tp_basicsize: sizeof(CharObject),
+    tp_itemsize: 0,
+    tp_dealloc: char_dealloc,
+    tp_print: char_print,
+    tp_getattr: char_getattr,
+    tp_setattr: char_setattr,
+    tp_doc: char_doc,
+    tp_methods: char_methods,
+};
+
+PyDoc_STRVAR(gfx_bitmap_doc,
+"A bitmap.\n"
+);
+static PyTypeObject BitmapClass =
+{
+    PYTHON23_HEAD_INIT
+    tp_name: "gfx.Bitmap",
+    tp_basicsize: sizeof(BitmapObject),
+    tp_itemsize: 0,
+    tp_dealloc: gfx_bitmap_dealloc,
+    tp_print: gfx_bitmap_print,
+    tp_getattr: gfx_bitmap_getattr,
+    tp_setattr: gfx_bitmap_setattr,
+    tp_doc: gfx_bitmap_doc,
+    tp_methods: gfx_bitmap_methods,
+};
+
+
+PyDoc_STRVAR(gfx_kdtree_doc,
+"A kdtree is a two dimensional tree for storing bounding box data\n"
+);
+static PyTypeObject KDTreeClass =
+{
+    PYTHON23_HEAD_INIT
+    tp_name: "gfx.KDTree",
+    tp_basicsize: sizeof(KDTreeObject),
+    tp_itemsize: 0,
+    tp_dealloc: gfx_kdtree_dealloc,
+    tp_print: gfx_kdtree_print,
+    tp_getattr: gfx_kdtree_getattr,
+    tp_setattr: gfx_kdtree_setattr,
+    tp_doc: gfx_kdtree_doc,
+    tp_methods: gfx_kdtree_methods,
+};
+
 
 //=====================================================================
 
@@ -1112,13 +1827,14 @@ PyDoc_STRVAR(f_setparameter_doc, \
 "    pdf2swf somefile.pdf -s help\n"
 ".\n"
 );
-static PyObject* f_setparameter(PyObject* self, PyObject* args, PyObject* kwargs)
+static PyObject* f_setparameter(PyObject* module, PyObject* args, PyObject* kwargs)
 {
     static char *kwlist[] = {"key", "value", NULL};
     char*key=0,*value=0;
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ss", kwlist, &key, &value))
 	return NULL;
-    pdfdriver->set_parameter(pdfdriver,key,value);
+    state_t*state = STATE(module);
+    state->pdfdriver->setparameter(state->pdfdriver,key,value);
     return PY_NONE;
 }
 
@@ -1152,13 +1868,14 @@ PyDoc_STRVAR(f_addfont_doc, \
 "then the files added by addfont() will be searched.\n"
 );
 
-static PyObject* f_addfont(PyObject* self, PyObject* args, PyObject* kwargs)
+static PyObject* f_addfont(PyObject* module, PyObject* args, PyObject* kwargs)
 {
     static char *kwlist[] = {"filename", NULL};
     char*filename=0;
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s", kwlist, &filename))
 	return NULL;
-    pdfdriver->set_parameter(pdfdriver,"font", filename);
+    state_t*state = STATE(module);
+    state->pdfdriver->setparameter(state->pdfdriver,"font", filename);
     return PY_NONE;
 }
 
@@ -1168,34 +1885,35 @@ PyDoc_STRVAR(f_addfontdir_doc, \
 "font file within this directory might be used to resolve external fonts\n"
 "in PDF files\n"
 );
-static PyObject* f_addfontdir(PyObject* self, PyObject* args, PyObject* kwargs)
+static PyObject* f_addfontdir(PyObject* module, PyObject* args, PyObject* kwargs)
 {
     static char *kwlist[] = {"filename", NULL};
     char*filename=0;
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s", kwlist, &filename))
 	return NULL;
-    pdfdriver->set_parameter(pdfdriver,"fontdir", filename);
+    state_t*state = STATE(module);
+    state->pdfdriver->setparameter(state->pdfdriver,"fontdir", filename);
     return PY_NONE;
 }
 
-static PyMethodDef pdf2swf_methods[] =
+static PyMethodDef gfx_methods[] =
 {
     /* sources */
-    {"open", (PyCFunction)f_open, METH_KEYWORDS, f_open_doc},
-    {"addfont", (PyCFunction)f_addfont, METH_KEYWORDS, f_addfont_doc},
-    {"addfontdir", (PyCFunction)f_addfontdir, METH_KEYWORDS, f_addfontdir_doc},
-    {"setparameter", (PyCFunction)f_setparameter, METH_KEYWORDS, f_setparameter_doc},
-    {"verbose", (PyCFunction)f_verbose, METH_KEYWORDS, f_verbose_doc},
+    {"open", (PyCFunction)f_open, M_FLAGS, f_open_doc},
+    {"addfont", (PyCFunction)f_addfont, M_FLAGS, f_addfont_doc},
+    {"addfontdir", (PyCFunction)f_addfontdir, M_FLAGS, f_addfontdir_doc},
+    {"setparameter", (PyCFunction)f_setparameter, M_FLAGS, f_setparameter_doc},
+    {"verbose", (PyCFunction)f_verbose, M_FLAGS, f_verbose_doc},
 
     /* devices */
-    {"SWF", (PyCFunction)f_createSWF, METH_KEYWORDS, f_createSWF_doc},
-    {"OCR", (PyCFunction)f_createOCR, METH_KEYWORDS, f_createOCR_doc},
-    {"ImageList", (PyCFunction)f_createImageList, METH_KEYWORDS, f_createImageList_doc},
-    {"PlainText", (PyCFunction)f_createPlainText, METH_KEYWORDS, f_createPlainText_doc},
-    {"PassThrough", (PyCFunction)f_createPassThrough, METH_KEYWORDS, f_createPassThrough_doc},
+    {"SWF", (PyCFunction)f_createSWF, M_FLAGS, f_createSWF_doc},
+    {"ImageList", (PyCFunction)f_createImageList, M_FLAGS, f_createImageList_doc},
+    {"PlainText", (PyCFunction)f_createPlainText, M_FLAGS, f_createPlainText_doc},
+    {"PassThrough", (PyCFunction)f_createPassThrough, M_FLAGS, f_createPassThrough_doc},
 #ifdef USE_OPENGL
-    {"OpenGL", (PyCFunction)f_createOpenGL, METH_KEYWORDS, f_createOpenGL_doc},
+    {"OpenGL", (PyCFunction)f_createOpenGL, M_FLAGS, f_createOpenGL_doc},
 #endif
+    {"KDTree", (PyCFunction)f_createKDTree, M_FLAGS, f_createKDTree_doc},
 
     /* sentinel */
     {0, 0, 0, 0}
@@ -1211,21 +1929,68 @@ PyDoc_STRVAR(gfx_doc, \
 "or mix pages from different PDF files.\n"
 );
 
-void initgfx(void)
+void gfx_free(void*module)
+{
+    state_t*state = STATE(module);
+    if(state->pdfdriver && state->pdfdriver->destroy)
+	state->pdfdriver->destroy(state->pdfdriver);
+    if(state->swfdriver && state->swfdriver->destroy)
+	state->swfdriver->destroy(state->swfdriver);
+    if(state->imagedriver && state->imagedriver->destroy)
+	state->imagedriver->destroy(state->imagedriver);
+    memset(state, 0, sizeof(state_t));
+}
+
+#ifdef PYTHON3
+static struct PyModuleDef gfx_moduledef = {
+        PyModuleDef_HEAD_INIT,
+        "gfx",
+        gfx_doc,
+        sizeof(state_t),
+        gfx_methods,
+        /*reload*/NULL,
+        /*traverse*/NULL,
+        /*clear*/NULL,
+        gfx_free,
+};
+#endif
+
+PyObject * PyInit_gfx(void)
 {
     initLog(0,0,0,0,0,2);
+#ifdef PYTHON3
+    PyObject*module = PyModule_Create(&gfx_moduledef);
+#else
+    PyObject*module = Py_InitModule3("gfx", gfx_methods, gfx_doc);
     OutputClass.ob_type = &PyType_Type;
     PageClass.ob_type = &PyType_Type;
     DocClass.ob_type = &PyType_Type;
-
-    pdfdriver = gfxsource_pdf_create();
-    swfdriver = gfxsource_swf_create();
-    imagedriver = gfxsource_image_create();
+    FontClass.ob_type = &PyType_Type;
+    CharClass.ob_type = &PyType_Type;
+    KDTreeClass.ob_type = &PyType_Type;
+    BitmapClass.ob_type = &PyType_Type;
+#endif
     
-    PyObject*module = Py_InitModule3("gfx", pdf2swf_methods, gfx_doc);
-    PyObject*module_dict = PyModule_GetDict(module);
+    state_t* state = STATE(module);
+    memset(state, 0, sizeof(state_t));
+    state->pdfdriver = gfxsource_pdf_create();
+    state->swfdriver = gfxsource_swf_create();
+    state->imagedriver = gfxsource_image_create();
 
+    PyObject*module_dict = PyModule_GetDict(module);
     PyDict_SetItemString(module_dict, "Doc", (PyObject*)&DocClass);
     PyDict_SetItemString(module_dict, "Page", (PyObject*)&PageClass);
     PyDict_SetItemString(module_dict, "Output", (PyObject*)&OutputClass);
+    PyDict_SetItemString(module_dict, "Char", (PyObject*)&CharClass);
+    PyDict_SetItemString(module_dict, "Font", (PyObject*)&FontClass);
+    PyDict_SetItemString(module_dict, "KDTree", (PyObject*)&KDTreeClass);
+    PyDict_SetItemString(module_dict, "Bitmap", (PyObject*)&BitmapClass);
+    PyDict_SetItemString(module_dict, "VERSION", (PyObject*)pystring_fromstring(PYTHON_GFX_VERSION));
+
+    return module;
 }
+#ifndef PYTHON3
+void initgfx(void) {
+    PyInit_gfx();
+}
+#endif

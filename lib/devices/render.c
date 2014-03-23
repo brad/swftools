@@ -25,9 +25,8 @@
 #include "../gfxdevice.h"
 #include "../gfxtools.h"
 #include "../mem.h"
-#define PNG_INLINE_EXPORTS
 #include "../types.h"
-#include "../png.c"
+#include "../png.h"
 #include "../log.h"
 #include "render.h"
 
@@ -89,7 +88,7 @@ typedef struct _fillinfo {
     gfxmatrix_t*matrix;
     gfxcxform_t*cxform;
     RGBA*gradient;
-    char clip_or_radial;
+    char linear_or_radial;
 } fillinfo_t;
 
 
@@ -275,16 +274,16 @@ static void fill_line_solid(RGBA*line, U32*z, int y, int x1, int x2, RGBA col)
 
     if(col.a!=255) {
         int ainv = 255-col.a;
-        col.r = (col.r*col.a)>>8;
-        col.g = (col.g*col.a)>>8;
-        col.b = (col.b*col.a)>>8;
+        col.r = (col.r*col.a)/255;
+        col.g = (col.g*col.a)/255;
+        col.b = (col.b*col.a)/255;
         do {
 	    if(z[bitpos]&bit) {
-		line[x].r = ((line[x].r*ainv)>>8)+col.r;
-		line[x].g = ((line[x].g*ainv)>>8)+col.g;
-		line[x].b = ((line[x].b*ainv)>>8)+col.b;
+		line[x].r = ((line[x].r*ainv)/255)+col.r;
+		line[x].g = ((line[x].g*ainv)/255)+col.g;
+		line[x].b = ((line[x].b*ainv)/255)+col.b;
 		//line[x].a = 255;
-		line[x].a = ((line[x].a*ainv)>>8)+col.a;
+		line[x].a = ((line[x].a*ainv)/255)+col.a;
 	    }
 	    bit <<= 1;
 	    if(!bit) {
@@ -338,7 +337,7 @@ static void fill_line_bitmap(RGBA*line, U32*z, int y, int x1, int x2, fillinfo_t
 	    int yy = (int)(yy1 - x * yinc1);
 	    int ainv;
 
-	    if(info->clip_or_radial) {
+	    if(info->linear_or_radial) {
 		if(xx<0) xx=0;
 		if(xx>=b->width) xx = b->width-1;
 		if(yy<0) yy=0;
@@ -354,9 +353,9 @@ static void fill_line_bitmap(RGBA*line, U32*z, int y, int x1, int x2, fillinfo_t
 	    ainv = 255-col.a;
 
 	    /* needs bitmap with premultiplied alpha */
-	    line[x].r = ((line[x].r*ainv)>>8)+col.r;
-	    line[x].g = ((line[x].g*ainv)>>8)+col.g;
-	    line[x].b = ((line[x].b*ainv)>>8)+col.b;
+	    line[x].r = ((line[x].r*ainv)/255)+col.r;
+	    line[x].g = ((line[x].g*ainv)/255)+col.g;
+	    line[x].b = ((line[x].b*ainv)/255)+col.b;
 	    line[x].a = 255;
 	}
 	bit <<= 1;
@@ -378,6 +377,7 @@ static void fill_line_gradient(RGBA*line, U32*z, int y, int x1, int x2, fillinfo
 	/* x direction equals y direction */
 	return;
     }
+    
     det = 1.0/det;
     double xx1 =  (  (-m->tx) * m->m11 - (y - m->ty) * m->m10) * det;
     double yy1 =  (- (-m->tx) * m->m01 + (y - m->ty) * m->m00) * det;
@@ -393,7 +393,7 @@ static void fill_line_gradient(RGBA*line, U32*z, int y, int x1, int x2, fillinfo
 	    int ainv;
 
             int pos = 0;
-            if(info->clip_or_radial) {
+            if(info->linear_or_radial) {
                 double xx = xx1 + x * xinc1;
                 double yy = yy1 + y * yinc1;
                 double r = sqrt(xx*xx + yy*yy);
@@ -409,9 +409,9 @@ static void fill_line_gradient(RGBA*line, U32*z, int y, int x1, int x2, fillinfo
 	    ainv = 255-col.a;
 
 	    /* needs bitmap with premultiplied alpha */
-	    line[x].r = ((line[x].r*ainv)>>8)+col.r;
-	    line[x].g = ((line[x].g*ainv)>>8)+col.g;
-	    line[x].b = ((line[x].b*ainv)>>8)+col.b;
+	    line[x].r = ((line[x].r*ainv)/255)+col.r;
+	    line[x].g = ((line[x].g*ainv)/255)+col.g;
+	    line[x].b = ((line[x].b*ainv)/255)+col.b;
 	    line[x].a = 255;
 	}
 	bit <<= 1;
@@ -535,10 +535,7 @@ void newclip(struct _gfxdevice*dev)
     c->data = (U32*)rfx_calloc(sizeof(U32) * i->bitwidth * i->height2);
     c->next = i->clipbuf;
     i->clipbuf = c;
-    if(c->next)
-	memcpy(c->data, c->next->data, i->bitwidth*i->height2);
-    else
-	memset(c->data, 0, sizeof(U32)*i->bitwidth*i->height2);
+    memset(c->data, 0, sizeof(U32)*i->bitwidth*i->height2);
 }
 
 void endclip(struct _gfxdevice*dev, char removelast)
@@ -608,7 +605,7 @@ void render_stroke(struct _gfxdevice*dev, gfxline_t*line, gfxcoord_t width, gfxc
 static void draw_line(gfxdevice_t*dev, gfxline_t*line)
 {
     internal_t*i = (internal_t*)dev->internal;
-    double x,y;
+    double x=0,y=0;
 
     while(line)
     {
@@ -714,7 +711,7 @@ void render_fillgradient(struct _gfxdevice*dev, gfxline_t*line, gfxgradient_t*gr
     m2.m00 *= i->zoom; m2.m01 *= i->zoom; m2.tx *= i->zoom;
     m2.m10 *= i->zoom; m2.m11 *= i->zoom; m2.ty *= i->zoom;
 
-    info.clip_or_radial = type == gfxgradient_radial;
+    info.linear_or_radial = type == gfxgradient_radial;
 
     int pos = 0;
     gfxcolor_t color = {0,0,0,0};
@@ -800,18 +797,18 @@ int render_result_save(gfxresult_t*r, const char*filename)
 	while(i->next) {
 	    sprintf(filenamebuf, "%s.%d.png", origname, nr);
             if(!i->palette) {
-	        writePNG(filename, (unsigned char*)i->img.data, i->img.width, i->img.height);
+	        png_write(filename, (unsigned char*)i->img.data, i->img.width, i->img.height);
             } else {
-	        writePalettePNG(filename, (unsigned char*)i->img.data, i->img.width, i->img.height);
+	        png_write_palette_based_2(filename, (unsigned char*)i->img.data, i->img.width, i->img.height);
             }
 	    nr++;
 	}
 	free(origname);
     } else {
         if(!i->palette) {
-	    writePNG(filename, (unsigned char*)i->img.data, i->img.width, i->img.height);
+	    png_write(filename, (unsigned char*)i->img.data, i->img.width, i->img.height);
 	} else {
-	    writePalettePNG(filename, (unsigned char*)i->img.data, i->img.width, i->img.height);
+	    png_write_palette_based_2(filename, (unsigned char*)i->img.data, i->img.width, i->img.height);
 	}
     }
     return 1;
@@ -821,7 +818,7 @@ char*gfximage_asXPM(gfximage_t*img, int depth)
     int d= 256/depth;
     char*str = (char*)malloc(img->width*img->height*4 + 500 + 16*depth*depth*depth);
     char*p = str;
-    p+= sprintf(p, "static char *noname[] = {\n\"%d %d 262144 3\",\n");
+    p+= sprintf(p, "static char *noname[] = {\n\"%d %d 262144 3\",\n", img->width, img->height);
     int r,g,b;
     for(r=0;r<depth;r++)
     for(g=0;g<depth;g++)
@@ -1041,7 +1038,7 @@ void render_endpage(struct _gfxdevice*dev)
     i->height2 = 0;
 }
 
-void render_drawlink(struct _gfxdevice*dev, gfxline_t*line, const char*action)
+void render_drawlink(struct _gfxdevice*dev, gfxline_t*line, const char*action, const char*text)
 {
     /* not supported for this output device */
 }

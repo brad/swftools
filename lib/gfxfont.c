@@ -21,13 +21,28 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 
+#include <assert.h>
+#include <stdio.h>
+#include <memory.h>
 #include "../config.h"
 #include "gfxdevice.h"
 #include "gfxtools.h"
 #include "gfxfont.h"
+#include "ttf.h"
+#include "mem.h"
+#include "log.h"
 
 static int loadfont_scale = 64;
 static int full_unicode = 1;
+
+static void glyph_clear(gfxglyph_t*g)
+{
+    gfxline_t*line;
+    if(g->name) {
+	free((void*)g->name); g->name = 0;
+    }
+    gfxline_free(g->line);g->line = 0;
+}
 
 #ifdef HAVE_FREETYPE
 
@@ -126,20 +141,11 @@ static gfxglyph_t cloneGlyph(gfxglyph_t*src)
     return dest;
 }
 
-static void glyph_clear(gfxglyph_t*g)
-{
-    gfxline_t*line;
-    if(g->name) {
-	free((void*)g->name); g->name = 0;
-    }
-    gfxline_free(g->line);g->line = 0;
-}
-
 static int errorno = 0;
 
 //#define DEBUG 1
 
-gfxfont_t* gfxfont_load(char*id, char*filename, unsigned int flags, double quality)
+gfxfont_t* gfxfont_load(const char*id, const char*filename, unsigned int flags, double quality)
 {
     FT_Face face;
     FT_Error error;
@@ -173,7 +179,7 @@ gfxfont_t* gfxfont_load(char*id, char*filename, unsigned int flags, double quali
 	return 0;
     }
     if(face->num_glyphs <= 0) {
-	fprintf(stderr, "File %s contains %d glyphs\n", face->num_glyphs);
+	fprintf(stderr, "File %s contains %d glyphs\n", filename, (int)face->num_glyphs);
 	return 0;
     }
 
@@ -333,9 +339,9 @@ gfxfont_t* gfxfont_load(char*id, char*filename, unsigned int flags, double quali
 	    error = FT_Load_Glyph(face, t, FT_LOAD_NO_BITMAP);
 	    if(error) {
 		if(hasname)
-		    fprintf(stderr, "Warning: glyph %d/%d (unicode %d, name %s) has return code %d\n", t, face->num_glyphs, glyph2unicode[t], name, error);
+		    fprintf(stderr, "Warning: glyph %d/%d (unicode %d, name %s) has return code %d\n", t, (int)face->num_glyphs, glyph2unicode[t], name, error);
 		else
-		    fprintf(stderr, "Warning: glyph %d/%d (unicode %d) has return code %d\n", t, face->num_glyphs, glyph2unicode[t], error);
+		    fprintf(stderr, "Warning: glyph %d/%d (unicode %d) has return code %d\n", t, (int)face->num_glyphs, glyph2unicode[t], error);
 		omit = 2;
 
 #if 0
@@ -358,7 +364,7 @@ gfxfont_t* gfxfont_load(char*id, char*filename, unsigned int flags, double quali
 	if(!omit) {
 	    error = FT_Get_Glyph(face->glyph, &glyph);
 	    if(error) {
-		fprintf(stderr, "Couldn't get glyph %d/%d, error:%d\n", t, face->num_glyphs, error);
+		fprintf(stderr, "Couldn't get glyph %d/%d, error:%d\n", t, (int)face->num_glyphs, error);
 		omit = 3;
 	    }
 	}
@@ -389,7 +395,7 @@ gfxfont_t* gfxfont_load(char*id, char*filename, unsigned int flags, double quali
 		}
 		l = l->next;
 	    }
-	    if(!ok && !name) {
+	    if(!ok && !hasname) {
 		gfxline_free(font->glyphs[font->num_glyphs].line);
 		font->glyphs[font->num_glyphs].line = 0;
 		font->glyphs[font->num_glyphs].advance = 0;
@@ -488,9 +494,10 @@ gfxfont_t* gfxfont_load(char*id, char*filename, unsigned int flags, double quali
 }
 #else
 
-gfxfont_t* gfxfont_load(char*id, char*filename, unsigned int flags, double quality)
+gfxfont_t* gfxfont_load(const char*id, const char*filename, unsigned int flags, double quality)
 {
     fprintf(stderr, "No freetype support compiled in! Not able to load %s\n", filename);
+    return 0;
 }
 
 #endif
@@ -513,5 +520,251 @@ void gfxfont_free(gfxfont_t*font)
     }
 
     free(font);
+}
+
+static inline int invalid_unicode(int u)
+{
+    return (u<32 || (u>=0xd800 && u<0xf900));
+}
+void gfxfont_fix_unicode(gfxfont_t*font, char remove_duplicates)
+{
+    int t;
+
+    /* find the current maximum unicode2glyph */
+    int max = 0;
+    for(t=0;t<font->num_glyphs;t++) {
+	int u = font->glyphs[t].unicode;
+	if(u > max)
+	    max = u;
+    }
+    char*used = rfx_calloc(max+1);
+
+    /* now, remap all duplicates (and invalid characters) and
+       calculate the new maximum */
+    int remap_pos=0;
+    max = 0;
+    for(t=0;t<font->num_glyphs;t++) {
+	int u = font->glyphs[t].unicode;
+	if(u>=0) {
+	    if(remove_duplicates && used[u]) {
+		u = font->glyphs[t].unicode = 0xe000 + remap_pos++;
+	    } if(invalid_unicode(u)) {
+		u = font->glyphs[t].unicode = 0xe000 + remap_pos++;
+	    } else {
+		used[u] = 1;
+	    }
+	}
+	if(u > max)
+	    max = u;
+    }
+    free(used);
+    if(font->unicode2glyph) {
+	free(font->unicode2glyph);
+    }
+    font->unicode2glyph = 0;
+    font->max_unicode = 0;
+}
+
+void gfxfont_add_unicode2glyph(gfxfont_t*font)
+{ 
+    int t;
+    int max = 0;
+    for(t=0;t<font->num_glyphs;t++) {
+	int u = font->glyphs[t].unicode;
+	if(u > max)
+	    max = u;
+    }
+    if(!font->unicode2glyph) {
+	/* (re)generate unicode2glyph-to-glyph mapping table by reverse mapping
+	   the glyph unicode2glyph's indexes into the mapping table. For collisions,
+   	   we prefer the smaller unicode2glyph value.*/
+	font->max_unicode = max+1;
+	font->unicode2glyph = malloc(sizeof(font->unicode2glyph[0])*(font->max_unicode));
+	memset(font->unicode2glyph, -1, sizeof(font->unicode2glyph[0])*(font->max_unicode));
+	
+	for(t=0;t<font->num_glyphs;t++) {
+	    int u = font->glyphs[t].unicode;
+	    if(u>=0 && font->unicode2glyph[u]<0) {
+		assert(u<font->max_unicode);
+		font->unicode2glyph[u] = t;
+	    }
+	}
+    } else {
+	/* add the new glyph indexes (most probably, that's only the remapped values
+	   at 0xe000) to the unicode2glyph table. Notice: Unlike glyph2unicode, we don't
+	   care about collisions in the unicode2glyph table */
+	int new_max_unicode = max+1;
+	if(font->max_unicode < new_max_unicode) {
+	    font->unicode2glyph = rfx_realloc(font->unicode2glyph, sizeof(font->unicode2glyph[0])*(font->max_unicode));
+	    memset(font->unicode2glyph+font->max_unicode, -1, sizeof(font->unicode2glyph[0])*(new_max_unicode - font->max_unicode));
+	}
+	for(t=0;t<font->num_glyphs;t++) {
+	    int u = font->glyphs[t].unicode;
+	    if(u>=0 && font->unicode2glyph[u]<0) {
+		font->unicode2glyph[u] = t;
+	    }
+	}
+	font->max_unicode = new_max_unicode;
+    }
+}
+
+ttf_t* gfxfont_to_ttf(gfxfont_t*font, char eot)
+{
+    ttf_t*ttf = ttf_new();
+    int num_glyphs = font->num_glyphs;
+    int offset = 0;
+    int t;
+    char has_nondef_glyph = 
+	font->num_glyphs && font->glyphs[0].unicode==-1 && 
+	(!font->glyphs[0].line || !font->glyphs[0].line->next);
+
+    if(!has_nondef_glyph) {
+	/* insert a new .nondef glyph at the start of the font */
+	offset++;
+	num_glyphs++;
+    }
+    ttf->num_glyphs = num_glyphs;
+    ttf->glyphs = rfx_calloc(num_glyphs*sizeof(ttfglyph_t));
+    double scale = 1.0;
+    int max_unicode = font->max_unicode;
+    int remap_pos=0;
+    for(t=0;t<font->num_glyphs;t++) {
+	gfxglyph_t*src = &font->glyphs[t];
+	ttfglyph_t*dest = &ttf->glyphs[t+offset];
+	gfxline_t*line = src->line;
+	int count = 0;
+	while(line) {
+	    count++;
+	    if(line->type == gfx_splineTo) 
+		count++;
+	    line=line->next;
+	}
+	dest->num_points = count;
+	dest->points = rfx_calloc(count*sizeof(ttfpoint_t));
+	count = 0;
+	line = src->line;
+	while(line) {
+	    if(line->type == gfx_splineTo) {
+		dest->points[count].x = line->sx*scale;
+		dest->points[count].y = line->sy*scale;
+		count++;
+	    }
+	    dest->points[count].x = line->x*scale;
+	    dest->points[count].y = line->y*scale;
+	    dest->points[count].flags |= GLYPH_ON_CURVE;
+	    if(line->type == gfx_moveTo) {
+		dest->points[count].flags |= GLYPH_CONTOUR_START;
+		if(count)
+		    dest->points[count-1].flags |= GLYPH_CONTOUR_END;
+	    }
+	    count++;
+	    line=line->next;
+	}
+	if(count)
+	    dest->points[count-1].flags |= GLYPH_CONTOUR_END;
+
+	/* compute bounding box */
+	int s;
+	if(count) {
+	    dest->xmin = dest->xmax = dest->points[0].x;
+	    dest->ymin = dest->ymax = dest->points[0].y;
+	    for(s=1;s<count;s++) {
+		if(dest->points[s].x < dest->xmin) 
+		    dest->xmin = dest->points[s].x;
+		if(dest->points[s].y < dest->ymin) 
+		    dest->ymin = dest->points[s].y;
+		if(dest->points[s].x > dest->xmax) 
+		    dest->xmax = dest->points[s].x;
+		if(dest->points[s].y > dest->ymax) 
+		    dest->ymax = dest->points[s].y;
+	    }
+	}
+
+	if(eot) {
+	    dest->bearing = dest->xmin;
+	    /* for windows font rendering, make sure coordinates are always 
+	       to the right of the origin (and use bearing to shift them "back".)
+	       Don't do this for non-windows platforms though because e.g. OS X 
+	       ignores bearing. */
+	    int xshift=0;
+	    if(dest->xmin < 0) {
+		xshift = -dest->xmin;
+		for(s=0;s<count;s++) {
+		    dest->points[s].x += xshift;
+		}
+		dest->xmin += xshift;
+		dest->xmax += xshift;
+	    }
+	}
+	dest->advance = src->advance*scale;
+
+	//dest->xmin=0; //TODO: might be necessary for some font engines?
+
+	dest->advance = src->advance*scale;
+
+	int u = font->glyphs[t].unicode;
+	if(u > max_unicode)
+	    max_unicode = u;
+    }
+    ttf->unicode_size = max_unicode+1;
+    ttf->unicode = rfx_calloc(sizeof(unicode_t)*ttf->unicode_size);
+    
+    if(!font->unicode2glyph) {
+	for(t=0;t<font->num_glyphs;t++) {
+	    gfxglyph_t*src = &font->glyphs[t];
+	    int u = font->glyphs[t].unicode;
+	    if(u<=0)
+		continue;
+	    if(u<32) {
+		msg("<warning> gfxfont_to_ttf: glyph %d has an invalid unicode (%d)", t, u);
+		continue;
+	    } else if(ttf->unicode[u]) {
+		msg("<warning> gfxfont_to_ttf: glyph %d has a duplicate unicode (%d)", t, u);
+		continue;
+	    }
+	    if(u<ttf->unicode_size)
+		ttf->unicode[u] = t+offset;
+	}
+    } else {
+	int u;
+	for(u=1;u<font->max_unicode;u++) {
+	    int g = font->unicode2glyph[u];
+	    if(g>=0 && u<32) {
+		msg("<warning> gfxfont_to_ttf: Font contains an invalid unicode (%d)", u);
+		continue;
+	    }
+	    if(g>=0 && g<font->num_glyphs && !ttf->unicode[u]) {
+		ttf->unicode[u] = g+offset;
+	    }
+	}
+    }
+	
+    ttf->ascent = font->ascent;
+    ttf->descent = -font->descent;
+    ttf->lineGap = 0;
+
+    ttf->full_name = strdup(font->id);
+    ttf->family_name = strdup(font->id);
+    ttf->subfamily_name = strdup(font->id);
+    ttf->postscript_name = strdup(font->id);
+    ttf->version_string = strdup("Version 1.0");
+    ttf->font_uid = strdup(font->id);
+
+    ttf_create_truetype_tables(ttf);
+    return ttf;
+}
+
+void gfxfont_save(gfxfont_t*font, const char*filename)
+{
+    ttf_t*ttf = gfxfont_to_ttf(font, 0);
+    ttf_save(ttf, filename);
+    ttf_destroy(ttf);
+}
+
+void gfxfont_save_eot(gfxfont_t*font, const char*filename)
+{
+    ttf_t*ttf = gfxfont_to_ttf(font, 1);
+    ttf_save_eot(ttf, filename);
+    ttf_destroy(ttf);
 }
 

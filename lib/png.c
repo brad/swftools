@@ -23,6 +23,7 @@
 #include <math.h>
 #include <fcntl.h>
 #include <zlib.h>
+#include <limits.h>
 
 #ifdef EXPORT
 #undef EXPORT
@@ -84,8 +85,8 @@ static unsigned int png_get_dword(FILE*fi)
 
 struct png_header
 {
-    int width;
-    int height;
+    unsigned width;
+    unsigned height;
     int bpp;
     int mode;
 };
@@ -122,7 +123,7 @@ static int png_read_header(FILE*fi, struct png_header*header)
 		return 0;
 	    }
 	    if(a!=8 && (b==2 || b==6)) {
-		printf("Bpp %d in mode %d not supported!\n", a);
+		printf("Bpp %d in mode %d not supported!\n", b, a);
 		return 0;
 	    }
 	    if(c!=0) {
@@ -166,7 +167,7 @@ static inline byte PaethPredictor (byte a,byte b,byte c)
         else return c;
 }
 
-static void applyfilter1(int mode, unsigned char*src, unsigned char*old, unsigned char*dest, int width)
+static void applyfilter1(int mode, unsigned char*src, unsigned char*old, unsigned char*dest, unsigned width)
 {
     int x;
     unsigned char last=0;
@@ -217,7 +218,7 @@ static void applyfilter1(int mode, unsigned char*src, unsigned char*old, unsigne
 
 }
 
-static void applyfilter2(int mode, unsigned char*src, unsigned char*old, unsigned char*dest, int width)
+static void applyfilter2(int mode, unsigned char*src, unsigned char*old, unsigned char*dest, unsigned width)
 {
     int x;
     unsigned char lasta=0;
@@ -280,7 +281,7 @@ static void applyfilter2(int mode, unsigned char*src, unsigned char*old, unsigne
 
 
 /* also performs 24 bit conversion! */
-static void applyfilter3(int mode, unsigned char*src, unsigned char*old, unsigned char*dest, int width)
+static void applyfilter3(int mode, unsigned char*src, unsigned char*old, unsigned char*dest, unsigned width)
 {
     int x;
     unsigned char lastr=0;
@@ -357,7 +358,7 @@ static void applyfilter3(int mode, unsigned char*src, unsigned char*old, unsigne
     }    
 }
 
-static void inline applyfilter4(int mode, unsigned char*src, unsigned char*old, unsigned char*dest, int width)
+void png_inverse_filter_32(int mode, unsigned char*src, unsigned char*old, unsigned char*dest, unsigned width)
 {
     int x;
     unsigned char lastr=0;
@@ -440,8 +441,7 @@ static void inline applyfilter4(int mode, unsigned char*src, unsigned char*old, 
     }    
 }
 
-
-EXPORT int getPNGdimensions(const char*sname, int*destwidth, int*destheight)
+EXPORT int png_getdimensions(const char*sname, unsigned*destwidth, unsigned*destheight)
 {
     FILE*fi;
     struct png_header header;
@@ -455,17 +455,17 @@ EXPORT int getPNGdimensions(const char*sname, int*destwidth, int*destheight)
 
     *destwidth = header.width;
     *destheight = header.height;
+    fclose(fi);
     return 1;
 }
 
-EXPORT int getPNG(const char*sname, int*destwidth, int*destheight, unsigned char**destdata)
+EXPORT int png_load(const char*sname, unsigned*destwidth, unsigned*destheight, unsigned char**destdata)
 {
     char tagid[4];
     int len;
     unsigned char*data;
     unsigned char*imagedata;
     unsigned char*zimagedata=0;
-    unsigned long int imagedatalen;
     unsigned long int zimagedatalen=0;
     unsigned char*palette = 0;
     int palettelen = 0;
@@ -499,7 +499,10 @@ EXPORT int getPNG(const char*sname, int*destwidth, int*destheight, unsigned char
 	return 0;
     }
 
-    imagedatalen = bypp * header.width * header.height + 65536;
+    unsigned long long imagedatalen_64 = ((unsigned long long)header.width + 1) * header.height * bypp;
+    if(imagedatalen_64 > 0xffffffff)
+	return 0;
+    unsigned long imagedatalen = (unsigned long)imagedatalen_64;
     imagedata = (unsigned char*)malloc(imagedatalen);
 
     fseek(fi,8,SEEK_SET);
@@ -561,6 +564,7 @@ EXPORT int getPNG(const char*sname, int*destwidth, int*destheight, unsigned char
         }
     }
     
+    fclose(fi);
     if(!zimagedata || uncompress(imagedata, &imagedatalen, zimagedata, zimagedatalen) != Z_OK) {
 	printf("Couldn't uncompress %s!\n", sname);
 	if(zimagedata)
@@ -568,7 +572,6 @@ EXPORT int getPNG(const char*sname, int*destwidth, int*destheight, unsigned char
 	return 0;
     }
     free(zimagedata);
-    fclose(fi);
 
     *destwidth = header.width;
     *destheight = header.height;
@@ -648,7 +651,7 @@ EXPORT int getPNG(const char*sname, int*destwidth, int*destheight, unsigned char
 		old = &data2[(y-1)*header.width*4];
 	    }
 	    if(header.mode == 6) { 
-		applyfilter4(mode, src, old, dest, header.width);
+		png_inverse_filter_32(mode, src, old, dest, header.width);
 	    } else { // header.mode = 2
 		applyfilter3(mode, src, old, dest, header.width);
 		/* replace alpha color */
@@ -830,11 +833,10 @@ static colornum_t* getColors(COL*image, int size, int*num)
     return colors;
 }
 
-static COL* getOptimalPalette(COL*image, int size, int palettesize)
+static void getOptimalPalette(COL*image, int size, int palettesize, COL*palette)
 {
     int num;
-    COL* ret = malloc(sizeof(COL)*palettesize);
-    memset(ret, 0, sizeof(COL)*palettesize);
+    memset(palette, 0, sizeof(COL)*256);
     colornum_t*colors = getColors(image, size, &num);
 
     assert(palettesize<=256);
@@ -846,12 +848,12 @@ static COL* getOptimalPalette(COL*image, int size, int palettesize)
            the image anyway, we are done */
         int t;
         for(t=0;t<num;t++) {
-            ret[t].r = colors[t].color;
-            ret[t].g = colors[t].color>>8;
-            ret[t].b = colors[t].color>>16;
-            ret[t].a = 255;
+            palette[t].r = colors[t].color;
+            palette[t].g = colors[t].color>>8;
+            palette[t].b = colors[t].color>>16;
+            palette[t].a = 255;
         }
-        return ret;
+        return;
     }
 
     if(num>2048) {
@@ -928,22 +930,20 @@ static COL* getOptimalPalette(COL*image, int size, int palettesize)
     free(belongsto);
     free(colors);
     for(t=0;t<palettesize;t++) {
-        ret[t].r = centers[t].color;
-        ret[t].g = centers[t].color>>8;
-        ret[t].b = centers[t].color>>16;
-        ret[t].a = 255;
+        palette[t].r = centers[t].color;
+        palette[t].g = centers[t].color>>8;
+        palette[t].b = centers[t].color>>16;
+        palette[t].a = 255;
     }
     free(centers);
-    return ret;
 }
 
 static int sqr(const int x) {return x*x;}
 
-static void quantizeImage(unsigned char*_image, int size, int numcolors, unsigned char**newimage, COL**palette) 
+static void png_quantize_image(unsigned char*_image, int size, int numcolors, unsigned char**newimage, COL*palette) 
 {
     COL*image = (COL*)_image;
-    COL*pal= getOptimalPalette(image, size, numcolors);
-    *palette = pal;
+    getOptimalPalette(image, size, numcolors, palette);
     *newimage = (unsigned char*)malloc(size);
     int t;
     for(t=0;t<size;t++) {
@@ -952,15 +952,14 @@ static void quantizeImage(unsigned char*_image, int size, int numcolors, unsigne
         int s;
         for(s=0;s<numcolors;s++) {
             int distance = 0;
-            distance += sqr((pal[s].r) - (image[t].r))*5;
-            distance += sqr((pal[s].g) - (image[t].g))*6;
-            distance += sqr((pal[s].b) - (image[t].b))*4;
+            distance += sqr((palette[s].r) - (image[t].r))*5;
+            distance += sqr((palette[s].g) - (image[t].g))*6;
+            distance += sqr((palette[s].b) - (image[t].b))*4;
             if(distance<best) {
                 best = distance;
                 bestcol = s;
             }
         }
-        //image[t] = pal[bestcol];
         (*newimage)[t] = bestcol;
     }
 }
@@ -1146,7 +1145,130 @@ static int finishzlib(z_stream*zs, FILE*fi)
     return size;
 }
 
-static void filter_line8(int filtermode, unsigned char*dest, unsigned char*src, int width)
+static inline u32 color_hash(COL*col)
+{
+    u32 col32 = *(u32*)col;
+    u32 hash = (col32 >> 17) ^ col32;
+    hash ^= ((hash>>8) + 1) ^ hash;
+    return hash;
+}
+
+static int png_get_number_of_palette_entries(COL*img, unsigned width, unsigned height, COL*palette, char*has_alpha)
+{
+    int len = width*height;
+    int t;
+    int palsize = 0;
+    int size[256];
+    int palette_overflow = 0;
+    u32 lastcol32 = 0;
+    
+    memset(size, 0, sizeof(size));
+
+    u32*pal = (u32*)malloc(65536*sizeof(u32));
+    int*count = (int*)malloc(65536*sizeof(int));
+
+    assert(sizeof(COL)==sizeof(u32));
+    assert(width && height);
+
+    lastcol32 = (*(u32*)&img[0])^0xffffffff; // don't match
+
+    for(t=0;t<len;t++) {
+	u32 col32 = *(u32*)&img[t];
+	if(col32 == lastcol32)
+	    continue;
+	
+	if(img[t].a!=255)
+	    *has_alpha=1;
+	int i;
+	
+	u32 hash = color_hash(&img[t])&255;
+
+	int csize = size[hash];
+	u32*cpal = &pal[hash*256];
+	int*ccount = &count[hash*256];
+	for(i=0;i<csize;i++) {
+	    if(col32 == cpal[i]) {
+		ccount[i]++;
+		break;
+	    }
+	}
+	if(i==csize) {
+	    if(palsize==256) {
+		palette_overflow = 1;
+		break;
+	    }
+	    count[size[hash]] = 1;
+	    cpal[size[hash]++] = col32;
+	    palsize++;
+	}
+	lastcol32 = col32;
+    }
+    if(palette_overflow) {
+	free(pal);
+	*has_alpha=1;
+	return width*height;
+    }
+    if(palette) {
+	int i = 0;
+	int occurences[256];
+	for(t=0;t<256;t++) {
+	    int s;
+	    int csize = size[t];
+	    u32* cpal = &pal[t*256];
+	    int* ccount = &count[t*256];
+	    for(s=0;s<csize;s++) {
+		occurences[i] = ccount[s];
+		palette[i++] = *(COL*)(&cpal[s]);
+	    }
+	}
+	assert(i==palsize);
+	int j;
+	for(i=0;i<palsize-1;i++) {
+	    for(j=i+1;j<palsize;j++) {
+		if(occurences[j] < occurences[i]) {
+		    int o = occurences[i];
+		    COL c = palette[i];
+		    occurences[i] = occurences[j];
+		    palette[i] = palette[j];
+		    occurences[j] = o;
+		    palette[j] = c;
+		}
+	    }
+	}
+    }
+    free(pal);
+    free(count);
+    return palsize;
+}
+
+static void png_map_to_palette(COL*src, unsigned char*dest, int size, COL*palette, int palette_size)
+{
+    int t;
+    int palette_hash[1024];
+    memset(palette_hash, 0, sizeof(int)*1024);
+    
+    for(t=0;t<palette_size;t++) {
+	u32 hash = color_hash(&palette[t])&1023;
+	while(palette_hash[hash])
+	    hash = (hash+1)&1023;
+	palette_hash[hash] = t;
+    }
+
+    for(t=0;t<size;t++) {
+	u32 hash = color_hash(&src[t]);
+	int index = 0;
+	while(1) {
+	    hash&=1023;
+	    index = palette_hash[hash];
+	    if(!memcmp(&palette[index], &src[t], sizeof(COL)))
+		break;
+	    hash++;
+	}
+	dest[t] = palette_hash[hash];
+    }
+}
+
+static int png_apply_specific_filter_8(int filtermode, unsigned char*dest, unsigned char*src, unsigned width)
 {
     int pos2 = 0;
     int pos = 0;
@@ -1186,9 +1308,10 @@ static void filter_line8(int filtermode, unsigned char*dest, unsigned char*src, 
 	    pos++;
 	}
     }
+    return filtermode;
 }
 
-static void filter_line32(int filtermode, unsigned char*dest, unsigned char*src, int width)
+static int png_apply_specific_filter_32(int filtermode, unsigned char*dest, unsigned char*src, unsigned width)
 {
     int pos2 = 0;
     int pos = 0;
@@ -1254,9 +1377,153 @@ static void filter_line32(int filtermode, unsigned char*dest, unsigned char*src,
 	    pos+=4;
 	}
     }
+    return filtermode;
 }
 
-EXPORT void savePNG(const char*filename, unsigned char*data, int width, int height, int numcolors)
+static int*num_bits_table = 0;
+
+static void make_num_bits_table()
+{
+    if(num_bits_table) return;
+    num_bits_table = malloc(sizeof(num_bits_table[0])*256);
+    int t;
+    for(t=0;t<256;t++) {
+	int bits=0;
+	int v = t;
+	while(v) {
+	    bits++;
+	    v&=v-1;
+	}
+	num_bits_table[t]=bits;
+    }
+}
+
+static int png_find_best_filter(unsigned char*src, unsigned width, int bpp, int y)
+{
+    make_num_bits_table();
+    
+    int num_filters = y>0?5:2; //don't apply y-direction filter in first line
+    
+    int bytes_per_pixel = bpp>>3;
+    int w = width*bytes_per_pixel;
+    int back_x = bytes_per_pixel;
+    int back_y = y?width*bytes_per_pixel:0;
+
+    unsigned char*pairs[5];
+    pairs[0] = calloc(1, 8192);
+    pairs[1] = calloc(1, 8192);
+    pairs[2] = calloc(1, 8192);
+    pairs[3] = calloc(1, 8192);
+    pairs[4] = calloc(1, 8192);
+    
+    unsigned char old[5];
+    int l = bytes_per_pixel - 1;
+    old[0] = src[l];
+    old[1] = src[l];
+    old[2] = src[l] - src[l-back_y];
+    old[3] = src[l] - src[l-back_y];
+    old[4] = src[l] - PaethPredictor(0, src[l-back_y], 0);
+
+    int different_pairs[5] = {0,0,0,0,0};
+
+    int x;
+    for(x=bytes_per_pixel;x<w;x++) {
+	unsigned char dest[5];
+	dest[0] = src[x];
+	dest[1] = src[x] - src[x-back_x];
+	dest[2] = src[x] - src[x-back_y];
+	dest[3] = src[x] - (src[x-back_x] + src[x-back_y])/2;
+	dest[4] = src[x] - PaethPredictor(src[x-back_x], src[x-back_y], src[x-back_x-back_y]);
+
+	int i;
+	for(i=0;i<5;i++) {
+	    int v = dest[i]<<8|old[i];
+	    int p = v>>3;
+	    int b = 1<<(v&7);
+	    if(!pairs[i][p]&b) {
+		pairs[i][p]|=b;
+		different_pairs[i]++;
+	    }
+	}
+	memcpy(old, dest, sizeof(old));
+    }
+    int f;
+    int best_nr = 0;
+    int best_energy = INT_MAX;
+    for(f=0;f<num_filters;f++) {
+	int energy = different_pairs[f];
+	if(energy<best_energy) {
+	    best_nr = f;
+	    best_energy = energy;
+	}
+    }
+    free(pairs[0]);
+    free(pairs[1]);
+    free(pairs[2]);
+    free(pairs[3]);
+    free(pairs[4]);
+    return best_nr;
+}
+    
+    
+static int png_apply_filter(unsigned char*dest, unsigned char*src, unsigned width, int y, int bpp)
+{
+    int best_nr = 0;
+#if 0
+    make_num_bits_table();
+    int num_filters = y>0?5:2; //don't apply y-direction filter in first line
+    int f;
+    int best_energy = INT_MAX;
+    int w = width*(bpp/8);
+    unsigned char* pairs = malloc(8192);
+    assert(bpp==8 || bpp==32);
+    for(f=0;f<num_filters;f++) {
+	if(bpp==8)
+	    png_apply_specific_filter_8(f, dest, src, width);
+	else
+	    png_apply_specific_filter_32(f, dest, src, width);
+	int x;
+
+	/* approximation for zlib compressability: test how many different
+	   (byte1,byte2) occur */
+	memset(pairs, 0, 8192);
+	int different_pairs = 0;
+	for(x=0;x<w-1;x++) {
+	    int v = dest[x+1]<<8|dest[x];
+	    int p = v>>3;
+	    int b = 1<<(v&7);
+	    if(!pairs[p]&b) {
+		pairs[p]|=b;
+		different_pairs ++;
+	    }
+	}
+	int energy = different_pairs;
+	if(energy<best_energy) {
+	    best_nr = f;
+	    best_energy = energy;
+	}
+    }
+    free(pairs);
+#else
+    best_nr = png_find_best_filter(src, width, bpp, y);
+#endif
+    if(bpp==8)
+	png_apply_specific_filter_8(best_nr, dest, src, width);
+    else
+	png_apply_specific_filter_32(best_nr, dest, src, width);
+    return best_nr;
+}
+
+int png_apply_filter_8(unsigned char*dest, unsigned char*src, unsigned width, int y)
+{
+    return png_apply_filter(dest, src, width, y, 8);
+}
+int png_apply_filter_32(unsigned char*dest, unsigned char*src, unsigned width, int y)
+{
+    return png_apply_filter(dest, src, width, y, 32);
+}
+
+static void png_write_palette_based2(const char*filename, unsigned char*data, unsigned width, unsigned height, int numcolors, int compression)
 {
     FILE*fi;
     int crc;
@@ -1264,8 +1531,6 @@ EXPORT void savePNG(const char*filename, unsigned char*data, int width, int heig
     unsigned char format;
     unsigned char tmp;
     unsigned char* data2=0;
-    u32 datalen;
-    u32 datalen2;
     unsigned char head[] = {137,80,78,71,13,10,26,10}; // PNG header
     int cols;
     char alpha = 1;
@@ -1274,24 +1539,38 @@ EXPORT void savePNG(const char*filename, unsigned char*data, int width, int heig
     u32 tmp32;
     int bpp;
     int ret;
+    char has_alpha=0;
     z_stream zs;
-    COL*palette=0;
+    COL palette[256];
 
     make_crc32_table();
 
-    if(!numcolors) {
-        bpp = 32;
-        cols = 0;
-        format = 5;
+    if(numcolors>256) {
+	bpp = 32;
+	cols = 0;
+	format = 5;
+    } else if(!numcolors) {
+	int num = png_get_number_of_palette_entries((COL*)data, width, height, palette, &has_alpha);
+	if(num<=255) {
+	    //printf("image has %d different colors (alpha=%d)\n", num, has_alpha);
+	    data2 = malloc(width*height);
+	    png_map_to_palette((COL*)data, data2, width*height, palette, num);
+	    data = data2;
+	    bpp = 8;
+	    cols = num;
+	    format = 3;
+	} else {
+	    bpp = 32;
+	    cols = 0;
+	    format = 5;
+	}
     } else {
         bpp = 8;
         cols = numcolors;
         format = 3;
-        quantizeImage(data, width*height, numcolors, &data, &palette);
+        png_quantize_image(data, width*height, numcolors, &data, palette);
     }
 
-    datalen = (width*height*bpp/8+cols*8);
-    
     fi = fopen(filename, "wb");
     if(!fi) {
 	perror("open");
@@ -1317,14 +1596,23 @@ EXPORT void savePNG(const char*filename, unsigned char*data, int width, int heig
     png_end_chunk(fi);
 
     if(format == 3) {
-	png_start_chunk(fi, "PLTE", 768);
-	 for(t=0;t<cols;t++) {
-	     png_write_byte(fi,palette[t].r);
-	     png_write_byte(fi,palette[t].g);
-	     png_write_byte(fi,palette[t].b);
-	 }
+	png_start_chunk(fi, "PLTE", cols*3);
+	for(t=0;t<cols;t++) {
+	    png_write_byte(fi,palette[t].r);
+	    png_write_byte(fi,palette[t].g);
+	    png_write_byte(fi,palette[t].b);
+	}
 	png_end_chunk(fi);
+
+	if(has_alpha) {
+	    png_start_chunk(fi, "tRNS", cols);
+	    for(t=0;t<cols;t++) {
+		png_write_byte(fi,palette[t].a);
+	    }
+	    png_end_chunk(fi);
+	}
     }
+
     long idatpos = png_start_chunk(fi, "IDAT", 0);
     
     memset(&zs,0,sizeof(z_stream));
@@ -1334,7 +1622,7 @@ EXPORT void savePNG(const char*filename, unsigned char*data, int width, int heig
     zs.opaque = Z_NULL;
     zs.next_out = writebuf;
     zs.avail_out = ZLIB_BUFFER_SIZE;
-    ret = deflateInit(&zs, 9);
+    ret = deflateInit(&zs, compression);
     if (ret != Z_OK) {
 	fprintf(stderr, "error in deflateInit(): %s", zs.msg?zs.msg:"unknown");
 	return;
@@ -1344,8 +1632,8 @@ EXPORT void savePNG(const char*filename, unsigned char*data, int width, int heig
     {
 	int x,y;
         int bypp = bpp/8;
-	int srcwidth = width * bypp;
-	int linelen = 1 + srcwidth;
+	unsigned srcwidth = width * bypp;
+	unsigned linelen = 1 + srcwidth;
         if(bypp==2) 
             linelen = 1 + ((srcwidth+1)&~1);
         else if(bypp==3) 
@@ -1353,21 +1641,23 @@ EXPORT void savePNG(const char*filename, unsigned char*data, int width, int heig
         else if(bypp==4) 
             linelen = 1 + ((srcwidth+3)&~3);
 	unsigned char* line = (unsigned char*)malloc(linelen);
-	unsigned char* bestline = (unsigned char*)malloc(linelen);
 	memset(line, 0, linelen);
+#if 0
+	unsigned char* bestline = (unsigned char*)malloc(linelen);
+	memset(bestline, 0, linelen);
 	for(y=0;y<height;y++)
 	{
 	    int filtermode;
 	    int bestsize = 0x7fffffff;
-	    for(filtermode=0;filtermode<=0;filtermode++) {
+	    for(filtermode=0;filtermode<=4;filtermode++) {
 		if(!y && filtermode>=2)
 		    continue; // don't do y direction filters in the first row
 		
 		line[0]=filtermode; //filter type
                 if(bpp==8)
-		    filter_line8(filtermode, line+1, &data[y*srcwidth], width);
+		    png_apply_specific_filter_8(filtermode, line+1, &data[y*srcwidth], width);
                 else
-		    filter_line32(filtermode, line+1, &data[y*srcwidth], width);
+		    png_apply_specific_filter_32(filtermode, line+1, &data[y*srcwidth], width);
 
 		int size = test_line(&zs, line, linelen);
 		if(size < bestsize) {
@@ -1377,7 +1667,18 @@ EXPORT void savePNG(const char*filename, unsigned char*data, int width, int heig
 	    }
 	    idatsize += compress_line(&zs, bestline, linelen, fi);
 	}
-	free(line);free(bestline);
+	free(bestline);
+#else
+	for(y=0;y<height;y++) {
+            if(bpp==8)
+		line[0] = png_apply_filter_8(line+1, &data[y*srcwidth], width, y);
+            else
+		line[0] = png_apply_filter_32(line+1, &data[y*srcwidth], width, y);
+
+	    idatsize += compress_line(&zs, line, linelen, fi);
+	}
+#endif
+	free(line);
     }
     idatsize += finishzlib(&zs, fi);
     png_patch_len(fi, idatpos, idatsize);
@@ -1387,15 +1688,24 @@ EXPORT void savePNG(const char*filename, unsigned char*data, int width, int heig
     png_end_chunk(fi);
 
     free(writebuf);
-    free(data2);
+    if(data2)
+	free(data2);
     fclose(fi);
 }
 
-EXPORT void writePNG(const char*filename, unsigned char*data, int width, int height)
+EXPORT void png_write_palette_based(const char*filename, unsigned char*data, unsigned width, unsigned height, int numcolors)
 {
-    savePNG(filename, data, width, height, 0);
+    png_write_palette_based2(filename, data, width, height, numcolors, Z_BEST_COMPRESSION);
 }
-EXPORT void writePalettePNG(const char*filename, unsigned char*data, int width, int height)
+EXPORT void png_write(const char*filename, unsigned char*data, unsigned width, unsigned height)
 {
-    savePNG(filename, data, width, height, 256);
+    png_write_palette_based2(filename, data, width, height, 0, Z_BEST_COMPRESSION);
+}
+EXPORT void png_write_quick(const char*filename, unsigned char*data, unsigned width, unsigned height)
+{
+    png_write_palette_based2(filename, data, width, height, 257, Z_NO_COMPRESSION);
+}
+EXPORT void png_write_palette_based_2(const char*filename, unsigned char*data, unsigned width, unsigned height)
+{
+    png_write_palette_based2(filename, data, width, height, 256, Z_BEST_COMPRESSION);
 }

@@ -42,20 +42,33 @@
 #include "../gfxtools.h"
 #include "swf.h"
 #include "../gfxpoly.h"
-#include "../png.h"
+#include "../gfximage.h"
 
-#define CHARDATAMAX 8192
+#define CHARDATAMAX 1024
 #define CHARMIDX 0
 #define CHARMIDY 0
 
-typedef struct _chardata {
+typedef struct _charatposition {
     int charid;
-    int fontid; /* TODO: use a SWFFONT instead */
+    SWFFONT*font;
     int x;
     int y;
     int size;
     RGBA color;
-} chardata_t;
+} charatposition_t;
+
+typedef struct _chararray {
+    charatposition_t chr[CHARDATAMAX+1];
+    int pos;
+    struct _chararray *next;
+} chararray_t;
+
+typedef struct _charbuffer {
+    MATRIX matrix;
+    chararray_t*array;
+    chararray_t*last;
+    struct _charbuffer *next;
+} charbuffer_t;
 
 typedef struct _fontlist
 {
@@ -77,6 +90,7 @@ typedef struct _swfoutput_internal
     double config_ppmsubpixels;
     double config_jpegsubpixels;
     char hasbuttons;
+    int config_invisibletexttofront;
     int config_dots;
     int config_simpleviewer;
     int config_opennewwindow;
@@ -88,6 +102,7 @@ typedef struct _swfoutput_internal
     int config_storeallcharacters;
     int config_enablezlib;
     int config_insertstoptag;
+    int config_showimages;
     int config_watermark;
     int config_noclips;
     int config_flashversion;
@@ -96,10 +111,15 @@ typedef struct _swfoutput_internal
     int config_splinemaxerror;
     int config_fontsplinemaxerror;
     int config_filloverlap;
+    int config_local_with_network;
+    int config_local_with_filesystem;
     int config_protect;
     int config_bboxvars;
     int config_disable_polygon_conversion;
     int config_normalize_polygon_positions;
+    int config_alignfonts;
+    double config_override_line_widths;
+    double config_remove_small_polygons;
     char config_disablelinks;
     RGBA config_linkcolor;
     float config_minlinewidth;
@@ -127,7 +147,7 @@ typedef struct _swfoutput_internal
     
     SHAPE* shape;
     int shapeid;
-    int textid;
+    int textmode;
 
     int watermarks;
     
@@ -167,8 +187,11 @@ typedef struct _swfoutput_internal
 
     SRECT pagebbox;
 
-    chardata_t chardata[CHARDATAMAX];
-    int chardatapos;
+    gfxline_t*stored_clipshapes; //for config_showclipshapes
+
+    charbuffer_t* chardata;
+    charbuffer_t* topchardata; //chars supposed to be above everything else
+
     int firstpage;
     char pagefinished;
 
@@ -188,21 +211,26 @@ typedef struct _swfoutput_internal
     char* mark;
 
 } swfoutput_internal;
+
+static const int NO_FONT3=0;
     
-static void swf_fillbitmap(gfxdevice_t*driver, gfxline_t*line, gfximage_t*img, gfxmatrix_t*move, gfxcxform_t*cxform);
+static void swf_fillbitmap(gfxdevice_t*dev, gfxline_t*line, gfximage_t*img, gfxmatrix_t*matrix, gfxcxform_t*cxform);
 static int  swf_setparameter(gfxdevice_t*driver, const char*key, const char*value);
 static void swf_drawstroke(gfxdevice_t*dev, gfxline_t*line, gfxcoord_t width, gfxcolor_t*color, gfx_capType cap_style, gfx_joinType joint_style, gfxcoord_t miterLimit);
 static void swf_startclip(gfxdevice_t*dev, gfxline_t*line);
 static void swf_endclip(gfxdevice_t*dev);
 static void swf_stroke(gfxdevice_t*dev, gfxline_t*line, gfxcoord_t width, gfxcolor_t*color, gfx_capType cap_style, gfx_joinType joint_style, gfxcoord_t miterLimit);
 static void swf_fill(gfxdevice_t*dev, gfxline_t*line, gfxcolor_t*color);
-static void swf_fillbitmap(gfxdevice_t*dev, gfxline_t*line, gfximage_t*img, gfxmatrix_t*matrix, gfxcxform_t*cxform);
 static void swf_fillgradient(gfxdevice_t*dev, gfxline_t*line, gfxgradient_t*gradient, gfxgradienttype_t type, gfxmatrix_t*matrix);
 static void swf_drawchar(gfxdevice_t*dev, gfxfont_t*font, int glyph, gfxcolor_t*color, gfxmatrix_t*matrix);
 static void swf_addfont(gfxdevice_t*dev, gfxfont_t*font);
-static void swf_drawlink(gfxdevice_t*dev, gfxline_t*line, const char*action);
+static void swf_drawlink(gfxdevice_t*dev, gfxline_t*line, const char*action, const char*text);
 static void swf_startframe(gfxdevice_t*dev, int width, int height);
 static void swf_endframe(gfxdevice_t*dev);
+static void swfoutput_namedlink(gfxdevice_t*dev, char*name, gfxline_t*points);
+static void swfoutput_linktopage(gfxdevice_t*dev, int page, gfxline_t*points);
+static void swfoutput_linktourl(gfxdevice_t*dev, const char*url, gfxline_t*points);
+
 static gfxresult_t* swf_finish(gfxdevice_t*driver);
 
 static swfoutput_internal* init_internal_struct()
@@ -217,7 +245,7 @@ static swfoutput_internal* init_internal_struct()
     i->startdepth = 0;
     i->linewidth = 0;
     i->shapeid = -1;
-    i->textid = -1;
+    i->textmode = 0;
     i->frameno = 0;
     i->lastframeno = 0;
 
@@ -235,7 +263,7 @@ static swfoutput_internal* init_internal_struct()
     i->fillstylechanged = 0;
 
     i->bboxrectpos = -1;
-    i->chardatapos = 0;
+    i->chardata = 0;
     i->firstpage = 1;
     i->pagefinished = 1;
 
@@ -256,8 +284,11 @@ static swfoutput_internal* init_internal_struct()
     i->config_splinemaxerror=1;
     i->config_fontsplinemaxerror=1;
     i->config_filloverlap=0;
+    i->config_local_with_network=0;
+    i->config_local_with_filesystem=0;
     i->config_protect=0;
     i->config_bboxvars=0;
+    i->config_override_line_widths=0;
     i->config_showclipshapes=0;
     i->config_minlinewidth=0.05;
     i->config_caplinewidth=1;
@@ -506,7 +537,7 @@ static void startFill(gfxdevice_t*dev)
     }
 }
 
-static inline int colorcompare(gfxdevice_t*dev, RGBA*a,RGBA*b)
+static inline int colorcompare(RGBA*a,RGBA*b)
 {
 
     if(a->r!=b->r ||
@@ -518,58 +549,57 @@ static inline int colorcompare(gfxdevice_t*dev, RGBA*a,RGBA*b)
     return 1;
 }
 
-static SRECT getcharacterbbox(gfxdevice_t*dev, SWFFONT*font, MATRIX* m)
+static SRECT getcharacterbbox(chararray_t*chardata, MATRIX* m, int flashversion)
 {
-    swfoutput_internal*i = (swfoutput_internal*)dev->internal;
     SRECT r;
     char debug = 0;
     memset(&r, 0, sizeof(r));
 
     int t;
     if(debug) printf("\n");
-    for(t=0;t<i->chardatapos;t++)
-    {
-	if(i->chardata[t].fontid != font->id) {
-	    msg("<error> Internal error: fontid %d != fontid %d", i->chardata[t].fontid, font->id);
-	    exit(1);
+
+    double div = 1.0 / 1024.0;
+    if(flashversion>=8 && !NO_FONT3) {
+	div = 1.0 / 20480.0;
+    }
+
+    while(chardata) {
+	for(t=0;t<chardata->pos;t++) {
+	    charatposition_t*chr = &chardata->chr[t];
+	    SRECT b = chr->font->layout->bounds[chr->charid];
+	    b.xmin = floor((b.xmin*(double)chr->size) *div);
+	    b.ymin = floor((b.ymin*(double)chr->size) *div);
+	    b.xmax = ceil((b.xmax*(double)chr->size)  *div);
+	    b.ymax = ceil((b.ymax*(double)chr->size)  *div);
+
+	    b.xmin += chr->x;
+	    b.ymin += chr->y;
+	    b.xmax += chr->x;
+	    b.ymax += chr->y;
+
+	    /* until we solve the INTERNAL_SCALING problem (see below)
+	       make sure the bounding box is big enough */
+	    b.xmin -= 20;
+	    b.ymin -= 20;
+	    b.xmax += 20;
+	    b.ymax += 20;
+
+	    b = swf_TurnRect(b, m);
+
+	    if(debug) printf("(%f,%f,%f,%f) -> (%f,%f,%f,%f) [font %d, char %d]\n",
+		    chr->font->layout->bounds[chr->charid].xmin/20.0,
+		    chr->font->layout->bounds[chr->charid].ymin/20.0,
+		    chr->font->layout->bounds[chr->charid].xmax/20.0,
+		    chr->font->layout->bounds[chr->charid].ymax/20.0,
+		    b.xmin/20.0,
+		    b.ymin/20.0,
+		    b.xmax/20.0,
+		    b.ymax/20.0,
+		    chr->font->id,
+		    chr->charid);
+	    swf_ExpandRect2(&r, &b);
 	}
-	SRECT b = font->layout->bounds[i->chardata[t].charid];
-	b.xmin *= i->chardata[t].size;
-	b.ymin *= i->chardata[t].size;
-	b.xmax *= i->chardata[t].size;
-	b.ymax *= i->chardata[t].size;
-
-	/* divide by 1024, rounding xmax/ymax up */
-	b.xmax += 1023; b.ymax += 1023; b.xmin /= 1024; b.ymin /= 1024; b.xmax /= 1024; b.ymax /= 1024;
-
-	b.xmin += i->chardata[t].x;
-	b.ymin += i->chardata[t].y;
-	b.xmax += i->chardata[t].x;
-	b.ymax += i->chardata[t].y;
-
-	/* until we solve the INTERNAL_SCALING problem (see below)
-	   make sure the bounding box is big enough */
-	b.xmin -= 20;
-	b.ymin -= 20;
-	b.xmax += 20;
-	b.ymax += 20;
-
-	b = swf_TurnRect(b, m);
-
-	if(debug) printf("(%f,%f,%f,%f) -> (%f,%f,%f,%f) [font %d/%d, char %d]\n",
-		font->layout->bounds[i->chardata[t].charid].xmin/20.0,
-		font->layout->bounds[i->chardata[t].charid].ymin/20.0,
-		font->layout->bounds[i->chardata[t].charid].xmax/20.0,
-		font->layout->bounds[i->chardata[t].charid].ymax/20.0,
-		b.xmin/20.0,
-		b.ymin/20.0,
-		b.xmax/20.0,
-		b.ymax/20.0,
-		i->chardata[t].fontid,
-		font->id,
-		i->chardata[t].charid
-		);
-	swf_ExpandRect2(&r, &b);
+	chardata = chardata->next;
     }
     if(debug) printf("-----> (%f,%f,%f,%f)\n",
 	    r.xmin/20.0,
@@ -579,20 +609,31 @@ static SRECT getcharacterbbox(gfxdevice_t*dev, SWFFONT*font, MATRIX* m)
     return r;
 }
 
-static void putcharacters(gfxdevice_t*dev, TAG*tag)
+static chararray_t*chararray_reverse(chararray_t*buf)
 {
-    swfoutput_internal*i = (swfoutput_internal*)dev->internal;
-    int t;
+    chararray_t*prev = 0;
+    while(buf) {
+	chararray_t*next = buf->next;
+	buf->next = prev;
+	prev = buf;
+	buf = next;
+    }
+    return prev;
+}
+
+static void chararray_writetotag(chararray_t*_chardata, TAG*tag)
+{
     SWFFONT font;
     RGBA color;
-    color.r = i->chardata[0].color.r^255;
+    color.r = _chardata?_chardata->chr[0].color.r^255:0;
     color.g = 0;
     color.b = 0;
     color.a = 0;
-    int lastfontid;
+    SWFFONT*lastfont;
     int lastx;
     int lasty;
     int lastsize;
+    int lastchar;
     int charids[128];
     int charadvance[128];
     int charstorepos;
@@ -602,20 +643,21 @@ static void putcharacters(gfxdevice_t*dev, TAG*tag)
 
     if(tag->id != ST_DEFINETEXT &&
         tag->id != ST_DEFINETEXT2) {
-        msg("<error> internal error: putcharacters needs an text tag, not %d\n",tag->id);
+        msg("<error> internal error: charbuffer_put needs an text tag, not %d\n",tag->id);
         exit(1);
     }
-    if(!i->chardatapos) {
-        msg("<warning> putcharacters called with zero characters");
+    if(!_chardata) {
+        msg("<warning> charbuffer_put called with zero characters");
     }
 
     for(pass = 0; pass < 2; pass++)
     {
         charstorepos = 0;
-        lastfontid = -1;
+        lastfont = 0;
         lastx = CHARMIDX;
         lasty = CHARMIDY;
         lastsize = -1;
+	lastchar = -1;
 
         if(pass==1)
         {
@@ -624,114 +666,157 @@ static void putcharacters(gfxdevice_t*dev, TAG*tag)
             swf_SetU8(tag, advancebits);
         }
 
-        for(t=0;t<=i->chardatapos;t++)
-        {
-            if(lastfontid != i->chardata[t].fontid || 
-                    lastx!=i->chardata[t].x ||
-                    lasty!=i->chardata[t].y ||
-                    !colorcompare(dev,&color, &i->chardata[t].color) ||
-                    charstorepos==127 ||
-                    lastsize != i->chardata[t].size ||
-                    t == i->chardatapos)
-            {
-                if(charstorepos && pass==0)
-                {
-                    int s;
-                    for(s=0;s<charstorepos;s++)
-                    {
-                        while(charids[s]>=(1<<glyphbits))
-                            glyphbits++;
-                        while(charadvance[s]>=(1<<advancebits))
-                            advancebits++;
-                    }
-                }
-                if(charstorepos && pass==1)
-                {
-                    tag->writeBit = 0; // Q&D
-                    swf_SetBits(tag, 0, 1); // GLYPH Record
-                    swf_SetBits(tag, charstorepos, 7); // number of glyphs
-                    int s;
-                    for(s=0;s<charstorepos;s++)
-                    {
-                        swf_SetBits(tag, charids[s], glyphbits);
-                        swf_SetBits(tag, charadvance[s], advancebits);
-                    }
-                }
-                charstorepos = 0;
+	chararray_t*chardata = _chardata;
 
-                if(pass == 1 && t<i->chardatapos)
-                {
-                    RGBA*newcolor=0;
-                    SWFFONT*newfont=0;
-                    int newx = 0;
-                    int newy = 0;
-                    if(lastx != i->chardata[t].x ||
-                       lasty != i->chardata[t].y)
-                    {
-                        newx = i->chardata[t].x;
-                        newy = i->chardata[t].y;
-			if(newx == 0)
-			    newx = SET_TO_ZERO;
-			if(newy == 0)
-			    newy = SET_TO_ZERO;
-                    }
-                    if(!colorcompare(dev,&color, &i->chardata[t].color)) 
-                    {
-                        color = i->chardata[t].color;
-                        newcolor = &color;
-                    }
-                    font.id = i->chardata[t].fontid;
-                    if(lastfontid != i->chardata[t].fontid || lastsize != i->chardata[t].size)
-                        newfont = &font;
+	while(chardata) {
+	    int t;
+	    
+	    assert(!chardata->next || chardata->pos == CHARDATAMAX);
+	    assert(chardata->pos);
 
-                    tag->writeBit = 0; // Q&D
-                    swf_TextSetInfoRecord(tag, newfont, i->chardata[t].size, newcolor, newx,newy);
-                }
+	    int to = chardata->next?chardata->pos-1:chardata->pos;
 
-                lastfontid = i->chardata[t].fontid;
-                lastx = i->chardata[t].x;
-                lasty = i->chardata[t].y;
-                lastsize = i->chardata[t].size;
-            }
+	    for(t=0;t<=to;t++)
+	    {
+		char islast = t==chardata->pos;
 
-            if(t==i->chardatapos)
-                    break;
+		charatposition_t*chr = &chardata->chr[t];
 
-            int advance;
-            int nextt = t==i->chardatapos-1?t:t+1;
-            int rel = i->chardata[nextt].x-i->chardata[t].x;
-            if(rel>=0 && (rel<(1<<(advancebits-1)) || pass==0)) {
-               advance = rel;
-               lastx=i->chardata[nextt].x;
-            }
-            else {
-               advance = 0;
-               lastx=i->chardata[t].x;
-            }
-            charids[charstorepos] = i->chardata[t].charid;
-            charadvance[charstorepos] = advance;
-            charstorepos ++;
-        }
+		if(lastfont != chr->font || 
+			lastx!=chr->x ||
+			lasty!=chr->y ||
+			!colorcompare(&color, &chardata->chr[t].color) ||
+			charstorepos==127 ||
+			lastsize != chardata->chr[t].size ||
+			islast)
+		{
+		    if(charstorepos && pass==0)
+		    {
+			int s;
+			for(s=0;s<charstorepos;s++)
+			{
+			    while(charids[s]>=(1<<glyphbits))
+				glyphbits++;
+			    while(charadvance[s]>=(1<<advancebits))
+				advancebits++;
+			}
+		    }
+		    if(charstorepos && pass==1)
+		    {
+			tag->writeBit = 0; // Q&D
+			swf_SetBits(tag, 0, 1); // GLYPH Record
+			swf_SetBits(tag, charstorepos, 7); // number of glyphs
+			int s;
+			for(s=0;s<charstorepos;s++)
+			{
+			    swf_SetBits(tag, charids[s], glyphbits);
+			    swf_SetBits(tag, charadvance[s], advancebits);
+			}
+		    }
+		    charstorepos = 0;
+
+		    if(pass == 1 && !islast)
+		    {
+			RGBA*newcolor=0;
+			SWFFONT*newfont=0;
+			int newx = 0;
+			int newy = 0;
+			if(lastx != chr->x ||
+			   lasty != chr->y)
+			{
+			    newx = chr->x;
+			    newy = chr->y;
+			    if(newx == 0)
+				newx = SET_TO_ZERO;
+			    if(newy == 0)
+				newy = SET_TO_ZERO;
+			}
+			if(!colorcompare(&color, &chr->color)) 
+			{
+			    color = chr->color;
+			    newcolor = &color;
+			}
+			font.id = chr->font->id;
+			if(lastfont != chr->font || lastsize != chr->size)
+			    newfont = &font;
+
+			tag->writeBit = 0; // Q&D
+			swf_TextSetInfoRecord(tag, newfont, chr->size, newcolor, newx, newy);
+		    }
+
+		    lastfont = chr->font;
+		    lastx = chr->x;
+		    lasty = chr->y;
+		    lastsize = chr->size;
+		}
+
+		if(islast)
+			break;
+
+		int nextx = chr->x;
+		if(t<chardata->pos-1) nextx = chardata->chr[t+1].x;
+		if(t==chardata->pos-1 && chardata->next) nextx = chardata->next->chr[0].x;
+		int dx = nextx-chr->x;
+		
+		int advance;
+		if(dx>=0 && (dx<(1<<(advancebits-1)) || pass==0)) {
+		   advance = dx;
+		   lastx=nextx;
+		} else {
+		   advance = 0;
+		   lastx=chr->x;
+		}
+
+		charids[charstorepos] = chr->charid;
+		charadvance[charstorepos] = advance;
+		lastchar = chr->charid;
+		charstorepos ++;
+	    }
+	    chardata = chardata->next;
+	}
     }
-    i->chardatapos = 0;
 }
 
-static void putcharacter(gfxdevice_t*dev, int fontid, int charid, int x,int y, int size, RGBA color)
+static void chararray_destroy(chararray_t*chr)
 {
-    swfoutput_internal*i = (swfoutput_internal*)dev->internal;
-    if(i->chardatapos == CHARDATAMAX)
-    {
-	msg("<warning> Character buffer too small. SWF will be slightly bigger");
-        endtext(dev);
-        starttext(dev);
+    while(chr) {
+	chararray_t*next = chr->next;
+	chr->next = 0;
+	free(chr);
+	chr = next;
     }
-    i->chardata[i->chardatapos].fontid = fontid;
-    i->chardata[i->chardatapos].charid = charid;
-    i->chardata[i->chardatapos].x = x;
-    i->chardata[i->chardatapos].y = y;
-    i->chardata[i->chardatapos].color = color;
-    i->chardata[i->chardatapos].size = size;
-    i->chardatapos++;
+}
+
+static inline int matrix_diff(MATRIX*m1, MATRIX*m2)
+{
+    return memcmp(m1,m2,sizeof(MATRIX));
+}
+static charbuffer_t*charbuffer_append(charbuffer_t*buf, SWFFONT*font, int charid, int x,int y, int size, RGBA color, MATRIX*m)
+{
+    if(!buf || matrix_diff(&buf->matrix,m)) {
+	charbuffer_t*n = rfx_calloc(sizeof(charbuffer_t));
+	n->matrix = *m;
+	n->next = buf;
+	buf = n;
+    }
+    if(!buf->last || buf->last->pos == CHARDATAMAX) {
+	chararray_t*n = rfx_calloc(sizeof(chararray_t));
+	if(!buf->array) {
+	    buf->array = buf->last = n;
+	} else {
+	    buf->last->next = n;
+	    buf->last = n;
+	}
+    }
+    chararray_t*a = buf->last;
+    a->chr[a->pos].font = font;
+    a->chr[a->pos].charid = charid;
+    a->chr[a->pos].x = x;
+    a->chr[a->pos].y = y;
+    a->chr[a->pos].color = color;
+    a->chr[a->pos].size = size;
+    a->pos++;
+    return buf;
 }
 
 /* Notice: we can only put chars in the range -1639,1638 (-32768/20,32768/20).
@@ -739,30 +824,27 @@ static void putcharacter(gfxdevice_t*dev, int fontid, int charid, int x,int y, i
    If we set it to low, however, the char positions will be inaccurate */
 #define GLYPH_SCALE 1
 
-static void endtext(gfxdevice_t*dev)
+static void chararray_writetodev(gfxdevice_t*dev, chararray_t*array, MATRIX*matrix, char invisible)
 {
     swfoutput_internal*i = (swfoutput_internal*)dev->internal;
-    if(i->textid<0)
-        return;
-
+   
+    int textid = getNewID(dev);
     i->tag = swf_InsertTag(i->tag,ST_DEFINETEXT2);
-    swf_SetU16(i->tag, i->textid);
-
+    swf_SetU16(i->tag, textid);
     SRECT r;
-    r = getcharacterbbox(dev, i->swffont, &i->fontmatrix);
+    r = getcharacterbbox(array, matrix, i->config_flashversion);
     r = swf_ClipRect(i->pagebbox, r);
     swf_SetRect(i->tag,&r);
+    swf_SetMatrix(i->tag, matrix);
+    msg("<trace> Placing text as ID %d", textid);
+    chararray_writetotag(array, i->tag);
+    i->chardata = 0;
 
-    swf_SetMatrix(i->tag,&i->fontmatrix);
-
-    msg("<trace> Placing text (%d characters) as ID %d", i->chardatapos, i->textid);
-
-    putcharacters(dev, i->tag);
     swf_SetU8(i->tag,0);
 
     if(i->swf->fileVersion >= 8) {
 	i->tag = swf_InsertTag(i->tag, ST_CSMTEXTSETTINGS);
-	swf_SetU16(i->tag, i->textid);
+	swf_SetU16(i->tag, textid);
 
 	//swf_SetU8(i->tag, /*subpixel grid*/(2<<3)|/*flashtype*/0x40);
 	swf_SetU8(i->tag, /*grid*/(1<<3)|/*flashtype*/0x40);
@@ -770,51 +852,37 @@ static void endtext(gfxdevice_t*dev)
 
 	swf_SetU32(i->tag, 0);//thickness
 	swf_SetU32(i->tag, 0);//sharpness
+	//swf_SetU32(i->tag, 0x20000);//thickness
+	//swf_SetU32(i->tag, 0x800000);//sharpness
 	swf_SetU8(i->tag, 0);//reserved
     }
-    i->tag = swf_InsertTag(i->tag,ST_PLACEOBJECT2);
-    
-    swf_ObjectPlace(i->tag,i->textid,getNewDepth(dev),&i->page_matrix,NULL,NULL);
-    i->textid = -1;
+    if(invisible && i->config_flashversion>=8) {
+	i->tag = swf_InsertTag(i->tag,ST_PLACEOBJECT3);
+	swf_ObjectPlaceBlend(i->tag,textid,getNewDepth(dev),&i->page_matrix,NULL,NULL,BLENDMODE_MULTIPLY);
+    } else {
+	i->tag = swf_InsertTag(i->tag,ST_PLACEOBJECT2);
+	swf_ObjectPlace(i->tag,textid,getNewDepth(dev),&i->page_matrix,NULL,NULL);
+    }
 }
 
-/* set's the matrix which is to be applied to characters drawn by swfoutput_drawchar() */
-static void setfontscale(gfxdevice_t*dev,double m11,double m12, double m21,double m22,double x, double y, char force)
+static void charbuffer_writetodevandfree(gfxdevice_t*dev, charbuffer_t*buf, char invisible)
 {
-    m11 *= 1024;
-    m12 *= 1024;
-    m21 *= 1024;
-    m22 *= 1024;
+    while(buf) {
+	charbuffer_t*next = buf->next;buf->next = 0;
+	chararray_writetodev(dev, buf->array, &buf->matrix, invisible);
+	chararray_destroy(buf->array);
+	free(buf);
+	buf = next;
+    }
+}
+
+static void endtext(gfxdevice_t*dev)
+{
     swfoutput_internal*i = (swfoutput_internal*)dev->internal;
-    if(i->lastfontm11 == m11 &&
-       i->lastfontm12 == m12 &&
-       i->lastfontm21 == m21 &&
-       i->lastfontm22 == m22 && !force)
+    if(!i->textmode)
         return;
-   if(i->textid>=0)
-	endtext(dev);
-    
-    i->lastfontm11 = m11;
-    i->lastfontm12 = m12;
-    i->lastfontm21 = m21;
-    i->lastfontm22 = m22;
-
-    double xsize = sqrt(m11*m11 + m12*m12);
-    double ysize = sqrt(m21*m21 + m22*m22);
-    i->current_font_size = (xsize>ysize?xsize:ysize)*1;
-    if(i->current_font_size < 1)
-	i->current_font_size = 1;
-    double ifs = 1.0 / (i->current_font_size*GLYPH_SCALE);
-
-    MATRIX m;
-    m.sx = (S32)((m11*ifs)*65536); m.r1 = (S32)((m21*ifs)*65536);
-    m.r0 = (S32)((m12*ifs)*65536); m.sy = (S32)((m22*ifs)*65536); 
-    /* this is the position of the first char to set a new fontmatrix-
-       we hope that it's close enough to all other characters using the
-       font, so we use its position as origin for the matrix */
-    m.tx = x*20;
-    m.ty = y*20;
-    i->fontmatrix = m;
+    charbuffer_writetodevandfree(dev, i->chardata, 0);i->chardata = 0;
+    i->textmode = 0;
 }
 
 static int watermark2_width=47;
@@ -890,19 +958,30 @@ static void insert_watermark(gfxdevice_t*dev, char drawall)
     i->watermarks++;
 }
 
+static void drawoutline(gfxdevice_t*dev, gfxline_t*line);
 
 static void endpage(gfxdevice_t*dev)
 {
     swfoutput_internal*i = (swfoutput_internal*)dev->internal;
     if(i->pagefinished)
-      return;
+	return;
+    
     if(i->shapeid>=0)
-      endshape(dev);
-    if(i->textid>=0)
-      endtext(dev);
+	endshape(dev);
+    if(i->textmode)
+	endtext(dev);
+    if(i->topchardata) {
+	charbuffer_writetodevandfree(dev, i->topchardata, 1);
+	i->topchardata=0;
+    }
     
     while(i->clippos)
         dev->endclip(dev);
+
+    if(i->stored_clipshapes) {
+        // in case of config_showclipshapes
+	drawoutline(dev, i->stored_clipshapes);
+    }
 
     if(i->config_watermark) {
 	insert_watermark(dev, 1);
@@ -1029,6 +1108,7 @@ void swf_startframe(gfxdevice_t*dev, int width, int height)
     i->lastframeno = i->frameno;
     i->firstpage = 0;
     i->pagefinished = 0;
+    i->chardata = 0;
 }
 
 void swf_endframe(gfxdevice_t*dev)
@@ -1113,7 +1193,6 @@ void gfxdevice_swf_init(gfxdevice_t* dev)
     dev->startclip = swf_startclip;
     dev->endclip = swf_endclip;
     dev->fill = swf_fill;
-    dev->fillbitmap = swf_fillbitmap;
     dev->fillgradient = swf_fillgradient;
     dev->addfont = swf_addfont;
     dev->drawchar = swf_drawchar;
@@ -1133,8 +1212,13 @@ void gfxdevice_swf_init(gfxdevice_t* dev)
     i->swf->movieSize.ymin = 0;
     i->swf->movieSize.xmax = 0;
     i->swf->movieSize.ymax = 0;
-    i->swf->fileAttributes = 9; // as3, local-with-network
-    
+
+    if(i->config_local_with_filesystem) {
+        i->swf->fileAttributes = 8; // as3, local-with-filesystem
+    } else {
+        i->swf->fileAttributes = 9; // as3, local-with-network
+    }
+
     i->swf->firstTag = swf_InsertTag(NULL,ST_SETBACKGROUNDCOLOR);
     i->tag = i->swf->firstTag;
     RGBA rgb;
@@ -1199,7 +1283,7 @@ static void starttext(gfxdevice_t*dev)
     if(i->config_watermark) {
 	insert_watermark(dev, 0);
     }
-    i->textid = getNewID(dev);
+    i->textmode = 1;
     i->swflastx=i->swflasty=0;
 }
 	    
@@ -1335,10 +1419,6 @@ static void endshape(gfxdevice_t*dev)
     m.ty += i->shapeposy;
     swf_ObjectPlace(i->tag,i->shapeid,getNewDepth(dev),&m,NULL,NULL);
 
-    if(i->config_animate) {
-	i->tag = swf_InsertTag(i->tag,ST_SHOWFRAME);
-    }
-
     swf_ShapeFree(i->shape);
     i->shape = 0;
     i->shapeid = -1;
@@ -1406,6 +1486,8 @@ void swfoutput_finalize(gfxdevice_t*dev)
 
     endpage(dev);
     fontlist_t *iterator = i->fontlist;
+    char use_font3 = i->config_flashversion>=8 && !NO_FONT3;
+
     while(iterator) {
 	TAG*mtag = i->swf->firstTag;
 	if(iterator->swffont) {
@@ -1415,16 +1497,25 @@ void swfoutput_finalize(gfxdevice_t*dev)
 	    }
 	    int used = iterator->swffont->use && iterator->swffont->use->used_glyphs;
 	    if(used) {
-		mtag = swf_InsertTag(mtag, ST_DEFINEFONT2);
-		swf_FontSetDefine2(mtag, iterator->swffont);
+		if(!use_font3) {
+		    mtag = swf_InsertTag(mtag, ST_DEFINEFONT2);
+		    swf_FontSetDefine2(mtag, iterator->swffont);
+		} else {
+		    mtag = swf_InsertTag(mtag, ST_DEFINEFONT3);
+		    swf_FontSetDefine2(mtag, iterator->swffont);
+		}
 	    }
 	}
 
         iterator = iterator->next;
     }
-	
+
     i->tag = swf_InsertTag(i->tag,ST_END);
     TAG* tag = i->tag->prev;
+   
+    if(use_font3 && i->config_storeallcharacters && i->config_alignfonts) {
+	swf_FontPostprocess(i->swf); // generate alignment information
+    }
 
     /* remove the removeobject2 tags between the last ST_SHOWFRAME
        and the ST_END- they confuse the flash player  */
@@ -1443,7 +1534,7 @@ void swfoutput_finalize(gfxdevice_t*dev)
 
     /* Add AVM2 actionscript */
     if(i->config_flashversion>=9 && 
-            (i->config_insertstoptag || i->hasbuttons)) {
+            (i->config_insertstoptag || i->hasbuttons) && !i->config_linknameurl) {
         swf_AddButtonLinks(i->swf, i->config_insertstoptag, 
                 i->config_internallinkfunction||i->config_externallinkfunction);
     }
@@ -1582,7 +1673,7 @@ static void swfoutput_setlinewidth(gfxdevice_t*dev, double _linewidth)
 }
 
 
-static void drawlink(gfxdevice_t*dev, ActionTAG*,ActionTAG*, gfxline_t*points, char mouseover, const char*url);
+static void drawlink(gfxdevice_t*dev, ActionTAG*,ActionTAG*, gfxline_t*points, char mouseover, char*type, const char*url);
 static void swfoutput_namedlink(gfxdevice_t*dev, char*name, gfxline_t*points);
 static void swfoutput_linktopage(gfxdevice_t*dev, int page, gfxline_t*points);
 static void swfoutput_linktourl(gfxdevice_t*dev, const char*url, gfxline_t*points);
@@ -1593,7 +1684,7 @@ static void swfoutput_linktourl(gfxdevice_t*dev, const char*url, gfxline_t*point
     dev->drawlink(dev, points, url);
 }*/
 
-void swf_drawlink(gfxdevice_t*dev, gfxline_t*points, const char*url)
+void swf_drawlink(gfxdevice_t*dev, gfxline_t*points, const char*url, const char*text)
 {
     swfoutput_internal*i = (swfoutput_internal*)dev->internal;
 
@@ -1628,7 +1719,7 @@ void swfoutput_linktourl(gfxdevice_t*dev, const char*url, gfxline_t*points)
     swfoutput_internal*i = (swfoutput_internal*)dev->internal;
     if(i->shapeid>=0)
 	endshape(dev);
-    if(i->textid>=0)
+    if(i->textmode)
 	endtext(dev);
 
     /* TODO: escape special characters in url */
@@ -1648,8 +1739,8 @@ void swfoutput_linktourl(gfxdevice_t*dev, const char*url, gfxline_t*points)
     }
     actions = action_End(actions);
    
-    drawlink(dev, actions, 0, points, 0, url);
-
+    drawlink(dev, actions, 0, points, 0, "url", url);
+    
     swf_ActionFree(actions);
 }
 void swfoutput_linktopage(gfxdevice_t*dev, int page, gfxline_t*points)
@@ -1659,7 +1750,7 @@ void swfoutput_linktopage(gfxdevice_t*dev, int page, gfxline_t*points)
 
     if(i->shapeid>=0)
 	endshape(dev);
-    if(i->textid>=0)
+    if(i->textmode)
 	endtext(dev);
   
     if(!i->config_internallinkfunction || i->config_flashversion>=9) {
@@ -1676,7 +1767,7 @@ void swfoutput_linktopage(gfxdevice_t*dev, int page, gfxline_t*points)
     char name[80];
     sprintf(name, "page%d", page);
 
-    drawlink(dev, actions, 0, points, 0, name);
+    drawlink(dev, actions, 0, points, 0, "page", name);
     
     swf_ActionFree(actions);
 }
@@ -1693,9 +1784,10 @@ void swfoutput_namedlink(gfxdevice_t*dev, char*name, gfxline_t*points)
 
     if(i->shapeid>=0)
 	endshape(dev);
-    if(i->textid>=0)
+    if(i->textmode)
 	endtext(dev);
 
+    char*type = 0;
     if(!strncmp(tmp, "call:", 5))
     {
 	char*x = strchr(&tmp[5], ':');
@@ -1714,6 +1806,7 @@ void swfoutput_namedlink(gfxdevice_t*dev, char*name, gfxline_t*points)
 	}
 	actions2 = action_End(0);
 	mouseover = 0;
+        type = "call";
     }
     else
     {
@@ -1726,9 +1819,10 @@ void swfoutput_namedlink(gfxdevice_t*dev, char*name, gfxline_t*points)
 	actions2 = action_PushString(actions2, "");
 	actions2 = action_SetVariable(actions2);
 	actions2 = action_End(actions2);
+        type = "subtitle";
     }
 
-    drawlink(dev, actions1, actions2, points, mouseover, name);
+    drawlink(dev, actions1, actions2, points, mouseover, type, name);
 
     swf_ActionFree(actions1);
     swf_ActionFree(actions2);
@@ -1775,7 +1869,7 @@ static void drawgfxline(gfxdevice_t*dev, gfxline_t*line, int fill)
 }
 
 
-static void drawlink(gfxdevice_t*dev, ActionTAG*actions1, ActionTAG*actions2, gfxline_t*points, char mouseover, const char*url)
+static void drawlink(gfxdevice_t*dev, ActionTAG*actions1, ActionTAG*actions2, gfxline_t*points, char mouseover, char*type, const char*url)
 {
     swfoutput_internal*i = (swfoutput_internal*)dev->internal;
     RGBA rgb;
@@ -1788,6 +1882,11 @@ static void drawlink(gfxdevice_t*dev, ActionTAG*actions1, ActionTAG*actions2, gf
     double posy = 0;
     int buttonid = getNewID(dev);
     gfxbbox_t bbox = gfxline_getbbox(points);
+    
+    if(i->config_linknameurl) {
+        actions1 = 0;
+        actions2 = 0;
+    }
     
     i->hasbuttons = 1;
 
@@ -1872,10 +1971,14 @@ static void drawlink(gfxdevice_t*dev, ActionTAG*actions1, ActionTAG*actions2, gf
             swf_ButtonPostProcess(i->tag, 1);
 	}
     }
+
     char buf[80];
+    char*buf2 = 0;
     const char* name = 0;
     if(i->config_linknameurl) {
-	name = url;
+        buf2 = malloc(strlen(type)+strlen(url)+2);
+        sprintf(buf2, "%s:%s", type, url);
+        name = buf2;
     } else {
         name = buf;
         sprintf(buf, "button%d", buttonid);
@@ -1897,6 +2000,9 @@ static void drawlink(gfxdevice_t*dev, ActionTAG*actions1, ActionTAG*actions2, gf
     } else {
 	swf_ObjectPlace(i->tag, buttonid, getNewDepth(dev),&i->page_matrix,0,(U8*)name);
     }
+
+    if(buf2)
+	free(buf2);
 }
 
       
@@ -1968,12 +2074,20 @@ int swf_setparameter(gfxdevice_t*dev, const char*name, const char*value)
 	}
     } else if(!strcmp(name, "filloverlap")) {
 	i->config_filloverlap = atoi(value);
+    } else if(!strcmp(name, "local_with_network")) {
+	i->config_local_with_network = atoi(value);
+	i->config_local_with_filesystem = !i->config_local_with_network;
+    } else if(!strcmp(name, "local_with_filesystem")) {
+	i->config_local_with_filesystem = atoi(value);
+	i->config_local_with_network = !i->config_local_with_filesystem;
     } else if(!strcmp(name, "linksopennewwindow")) {
 	i->config_opennewwindow = atoi(value);
     } else if(!strcmp(name, "opennewwindow")) {
 	i->config_opennewwindow = atoi(value);
     } else if(!strcmp(name, "storeallcharacters")) {
 	i->config_storeallcharacters = atoi(value);
+    } else if(!strcmp(name, "alignfonts")) {
+	i->config_alignfonts = atoi(value);
     } else if(!strcmp(name, "enablezlib")) {
 	i->config_enablezlib = atoi(value);
     } else if(!strcmp(name, "bboxvars")) {
@@ -2018,16 +2132,27 @@ int swf_setparameter(gfxdevice_t*dev, const char*name, const char*value)
 	}
     } else if(!strcmp(name, "minlinewidth")) {
 	i->config_minlinewidth = atof(value);
+    } else if(!strcmp(name, "remove_small_polygons")) {
+	i->config_remove_small_polygons = atof(value);
     } else if(!strcmp(name, "caplinewidth")) {
 	i->config_caplinewidth = atof(value);
     } else if(!strcmp(name, "linktarget")) {
 	i->config_linktarget = strdup(value);
+    } else if(!strcmp(name, "invisibletexttofront")) {
+	i->config_invisibletexttofront = atoi(value);
     } else if(!strcmp(name, "noclips")) {
 	i->config_noclips = atoi(value);
     } else if(!strcmp(name, "dumpfonts")) {
 	i->config_dumpfonts = atoi(value);
+    } else if(!strcmp(name, "override_line_widths")) {
+	i->config_override_line_widths = atof(value);
     } else if(!strcmp(name, "animate")) {
 	i->config_animate = atoi(value);
+	i->config_framerate = 25;
+    } else if(!strcmp(name, "linknameurl")) {
+	i->config_linknameurl = atoi(value);
+    } else if(!strcmp(name, "showimages")) {
+	i->config_showimages = atoi(value);
     } else if(!strcmp(name, "disablelinks")) {
 	i->config_disablelinks = atoi(value);
     } else if(!strcmp(name, "simpleviewer")) {
@@ -2071,7 +2196,7 @@ int swf_setparameter(gfxdevice_t*dev, const char*name, const char*value)
         printf("linkcolor=<color)           color of links (format: RRGGBBAA)\n");
         printf("linknameurl		    Link buttons will be named like the URL they refer to (handy for iterating through links with actionscript)\n");
         printf("storeallcharacters          don't reduce the fonts to used characters in the output file\n");
-        printf("enablezlib                  switch on zlib compression (also done if flashversion>=7)\n");
+        printf("enablezlib                  switch on zlib compression (also done if flashversion>=6)\n");
         printf("bboxvars                    store the bounding box of the SWF file in actionscript variables\n");
         printf("dots                        Take care to handle dots correctly\n");
         printf("reordertags=0/1             (default: 1) perform some tag optimizations\n");
@@ -2163,7 +2288,9 @@ static int add_image(swfoutput_internal*i, gfximage_t*img, int targetwidth, int 
     
     if(newsizex<sizex || newsizey<sizey) {
 	msg("<verbose> Scaling %dx%d image to %dx%d", sizex, sizey, newsizex, newsizey);
-	newpic = swf_ImageScale(mem, sizex, sizey, newsizex, newsizey);
+	gfximage_t*ni = gfximage_rescale(img, newsizex, newsizey);
+	newpic = (RGBA*)ni->data;
+	free(ni);
 	*newwidth = sizex = newsizex;
 	*newheight  = sizey = newsizey;
 	mem = newpic;
@@ -2212,6 +2339,16 @@ static int add_image(swfoutput_internal*i, gfximage_t*img, int targetwidth, int 
     return bitid;
 }
 
+int line_is_empty(gfxline_t*line)
+{
+    while(line) {
+	if(line->type != gfx_moveTo)
+	    return 0;
+	line = line->next;
+    }
+    return 1;
+}
+
 static SRECT gfxline_getSWFbbox(gfxline_t*line)
 {
     gfxbbox_t bbox = gfxline_getbbox(line);
@@ -2221,16 +2358,6 @@ static SRECT gfxline_getSWFbbox(gfxline_t*line)
     r.xmax = (int)(bbox.xmax*20);
     r.ymax = (int)(bbox.ymax*20);
     return r;
-}
-
-int line_is_empty(gfxline_t*line)
-{
-    while(line) {
-	if(line->type != gfx_moveTo)
-	    return 0;
-	line = line->next;
-    }
-    return 1;
 }
 
 static void swf_fillbitmap(gfxdevice_t*dev, gfxline_t*line, gfximage_t*img, gfxmatrix_t*matrix, gfxcxform_t*cxform)
@@ -2265,6 +2392,11 @@ static void swf_fillbitmap(gfxdevice_t*dev, gfxline_t*line, gfximage_t*img, gfxm
     SHAPE*shape;
     swf_ShapeNew(&shape);
     int fsid = swf_ShapeAddBitmapFillStyle(shape,&m,bitid,1);
+    int lsid = 0;
+    if(i->config_showimages) {
+	RGBA pink = {255,255,0,255};
+	lsid = swf_ShapeAddLineStyle(shape, 20, &pink);
+    }
     swf_SetU16(i->tag, myshapeid);
     SRECT r = gfxline_getSWFbbox(line);
     r = swf_ClipRect(i->pagebbox, r);
@@ -2272,7 +2404,7 @@ static void swf_fillbitmap(gfxdevice_t*dev, gfxline_t*line, gfximage_t*img, gfxm
     swf_SetShapeStyles(i->tag,shape);
     swf_ShapeCountBits(shape,NULL,NULL);
     swf_SetShapeBits(i->tag,shape);
-    swf_ShapeSetAll(i->tag,shape,UNDEFINED_COORD,UNDEFINED_COORD,0,fsid,0);
+    swf_ShapeSetAll(i->tag,shape,UNDEFINED_COORD,UNDEFINED_COORD,lsid,fsid,0);
     i->swflastx = i->swflasty = UNDEFINED_COORD;
     drawgfxline(dev, line, 1);
     swf_ShapeSetEnd(i->tag);
@@ -2284,8 +2416,7 @@ static void swf_fillbitmap(gfxdevice_t*dev, gfxline_t*line, gfximage_t*img, gfxm
     swf_ObjectPlace(i->tag,myshapeid,getNewDepth(dev),&i->page_matrix,&cxform2,NULL);
 }
 
-static RGBA col_black = {255,0,0,0};
-
+static RGBA col_purple = {255,255,0,255};
 static void drawoutline(gfxdevice_t*dev, gfxline_t*line)
 {
     swfoutput_internal*i = (swfoutput_internal*)dev->internal;
@@ -2295,7 +2426,7 @@ static void drawoutline(gfxdevice_t*dev, gfxline_t*line)
 
     SHAPE*shape;
     swf_ShapeNew(&shape);
-    int lsid = swf_ShapeAddLineStyle(shape,1,&col_black);
+    int lsid = swf_ShapeAddLineStyle(shape,60,&col_purple);
 
     swf_SetU16(i->tag,myshapeid);
     SRECT r = gfxline_getSWFbbox(line);
@@ -2328,8 +2459,9 @@ static void swf_startclip(gfxdevice_t*dev, gfxline_t*line)
         i->clippos --;
     } 
 
-    if(i->config_showclipshapes)
-	drawoutline(dev, line);
+    if(i->config_showclipshapes) {
+        i->stored_clipshapes = gfxline_append(i->stored_clipshapes, gfxline_clone(line));
+    }
 
     int myshapeid = getNewID(dev);
     i->tag = swf_InsertTag(i->tag,ST_DEFINESHAPE3);
@@ -2386,7 +2518,7 @@ static void swf_endclip(gfxdevice_t*dev)
     swfoutput_internal*i = (swfoutput_internal*)dev->internal;
     if(i->config_noclips)
 	return;
-    if(i->textid>=0)
+    if(i->textmode)
 	endtext(dev);
     if(i->shapeid>=0)
 	endshape(dev);
@@ -2532,6 +2664,10 @@ static void swf_stroke(gfxdevice_t*dev, gfxline_t*line, gfxcoord_t width, gfxcol
     gfxbbox_t r = gfxline_getbbox(line);
     int is_outside_page = !is_inside_page(dev, r.xmin, r.ymin) || !is_inside_page(dev, r.xmax, r.ymax);
 
+    if(i->config_override_line_widths) {
+	width = i->config_override_line_widths;
+    }
+
     /* TODO: * split line into segments, and perform this check for all segments */
 
     if(i->config_disable_polygon_conversion || /*type>=5 ||*/
@@ -2547,11 +2683,11 @@ static void swf_stroke(gfxdevice_t*dev, gfxline_t*line, gfxcoord_t width, gfxcol
 	if(has_dots)
 	    gfxline_fix_short_edges(line);
 	/* we need to convert the line into a polygon */
-	gfxpoly_t* poly = gfxpoly_strokeToPoly(line, width, cap_style, joint_style, miterLimit);
-	gfxline_t*gfxline = gfxpoly_to_gfxline(poly);
+	gfxpoly_t* poly = gfxpoly_from_stroke(line, width, cap_style, joint_style, miterLimit, DEFAULT_GRID);
+	gfxline_t*gfxline = gfxline_from_gfxpoly(poly);
 	dev->fill(dev, gfxline, color);
 	gfxline_free(gfxline);
-	gfxpoly_free(poly);
+	gfxpoly_destroy(poly);
 	return;
     }
 
@@ -2589,10 +2725,16 @@ static void swf_fill(gfxdevice_t*dev, gfxline_t*line, gfxcolor_t*color)
 	return;
     if(!color->a)
 	return;
+
     gfxbbox_t r = gfxline_getbbox(line);
     int is_outside_page = !is_inside_page(dev, r.xmin, r.ymin) || !is_inside_page(dev, r.xmax, r.ymax);
 
-    //if(i->chardatapos && i->chardata[i->chardatapos-1].color.a) {
+    if(r.xmax - r.xmin < i->config_remove_small_polygons &&
+       r.ymax - r.ymin < i->config_remove_small_polygons) {
+	msg("<verbose> Not drawing %.2fx%.2f polygon", r.xmax - r.xmin, r.ymax - r.ymin);
+	return;
+    }
+
     endtext(dev);
 
     if(!i->config_ignoredraworder)
@@ -2702,13 +2844,13 @@ static void swf_fillgradient(gfxdevice_t*dev, gfxline_t*line, gfxgradient_t*grad
     swf_FreeGradient(swfgradient);free(swfgradient);
 }
 
-static SWFFONT* gfxfont_to_swffont(gfxfont_t*font, const char* id)
+static SWFFONT* gfxfont_to_swffont(gfxfont_t*font, const char* id, int version)
 {
     SWFFONT*swffont = (SWFFONT*)rfx_calloc(sizeof(SWFFONT));
     int t;
     SRECT bounds = {0,0,0,0};
     swffont->id = -1;
-    swffont->version = 2;
+    swffont->version = version;
     swffont->name = (U8*)strdup(id);
     swffont->layout = (SWFLAYOUT*)rfx_calloc(sizeof(SWFLAYOUT));
     swffont->layout->ascent = 0;
@@ -2722,21 +2864,26 @@ static SWFFONT* gfxfont_to_swffont(gfxfont_t*font, const char* id)
     swffont->glyph2ascii = (U16*)rfx_calloc(sizeof(U16)*swffont->numchars);
     swffont->glyph = (SWFGLYPH*)rfx_calloc(sizeof(SWFGLYPH)*swffont->numchars);
     swffont->glyphnames = (char**)rfx_calloc(sizeof(char*)*swffont->numchars);
-    for(t=0;t<font->max_unicode;t++) {
-	swffont->ascii2glyph[t] = font->unicode2glyph[t];
-    }
+
     SRECT max = {0,0,0,0};
     for(t=0;t<font->num_glyphs;t++) {
 	drawer_t draw;
 	gfxline_t*line;
 	double advance = 0;
-	swffont->glyph2ascii[t] = font->glyphs[t].unicode;
-	if(swffont->glyph2ascii[t] == 0xffff || swffont->glyph2ascii[t] == 0x0000) {
+	int u = font->glyphs[t].unicode;
+	int s;
+	char twice=0;
+	for(s=0;s<font->num_glyphs;s++) {
+	    if(swffont->glyph2ascii[s]==u) 
+		twice=1;
+	}
+	if(u >= 0xd800 || u == 0x0000 || twice) {
 	    /* flash 8 flashtype requires unique unicode IDs for each character.
 	       We use the Unicode private user area to assign characters, hoping that
-	       the font doesn't contain more than 2048 glyphs */
-	    swffont->glyph2ascii[t] = 0xe000 + (t&0x1fff);
+	       the font doesn't contain more than 8192 glyphs */
+	    u = 0xe000 + (t&0x1fff);
 	}
+	swffont->glyph2ascii[t] = u;
 
 	if(font->glyphs[t].name) {
 	    swffont->glyphnames[t] = strdup(font->glyphs[t].name);
@@ -2747,10 +2894,18 @@ static SWFFONT* gfxfont_to_swffont(gfxfont_t*font, const char* id)
 
 	swf_Shape01DrawerInit(&draw, 0);
 	line = font->glyphs[t].line;
+
+	const double scale = GLYPH_SCALE;
 	while(line) {
 	    FPOINT c,to;
-	    c.x = line->sx * GLYPH_SCALE; c.y = line->sy * GLYPH_SCALE;
-	    to.x = line->x * GLYPH_SCALE; to.y = line->y * GLYPH_SCALE;
+	    c.x = line->sx * scale; c.y = -line->sy * scale;
+	    //to.x = floor(line->x * scale); to.y = floor(-line->y * scale);
+	    to.x = line->x * scale; to.y = -line->y * scale;
+
+	    /*if(strstr(swffont->name, "BIRNU") && t==90) {
+		to.x += 1;
+	    }*/
+
 	    if(line->type == gfx_moveTo) {
 		draw.moveTo(&draw, &to);
 	    } else if(line->type == gfx_lineTo) {
@@ -2779,6 +2934,7 @@ static SWFFONT* gfxfont_to_swffont(gfxfont_t*font, const char* id)
 
 	swf_ExpandRect2(&bounds, &swffont->layout->bounds[t]);
     }
+
     for(t=0;t<font->num_glyphs;t++) {
 	SRECT bbox = swffont->layout->bounds[t];
 
@@ -2806,22 +2962,19 @@ static SWFFONT* gfxfont_to_swffont(gfxfont_t*font, const char* id)
        The baseline is defined as the y-position zero 
      */
 
-    swffont->layout->ascent = -bounds.ymin;
-    if(swffont->layout->ascent < 0)
-        swffont->layout->ascent = 0;
-    swffont->layout->descent = bounds.ymax;
-    if(swffont->layout->descent < 0)
-        swffont->layout->descent = 0;
+    swffont->layout->ascent = bounds.ymin<0?-bounds.ymin:0;
+    swffont->layout->descent = bounds.ymax>0?bounds.ymax:0;
     swffont->layout->leading = bounds.ymax - bounds.ymin;
 
     /* if the font has proper ascent/descent values (>0) and those define
-       greater line spacing that what we estimated from the bounding boxes,
-       use the font's parameters */
-    if(font->ascent*20 > swffont->layout->ascent)
+       greater (but not overly large) line spacing than what we estimated 
+       from the bounding boxes, use the font's parameters */
+    if(font->ascent*20 > swffont->layout->ascent && font->ascent*20*2 < swffont->layout->ascent)
 	swffont->layout->ascent = font->ascent*20;
-    if(font->descent*20 > swffont->layout->descent)
+    if(font->descent*20 > swffont->layout->descent && font->descent*20*2 < swffont->layout->descent)
 	swffont->layout->descent = font->descent*20;
 
+    swf_FontSort(swffont);
     return swffont;
 }
 
@@ -2841,7 +2994,7 @@ static void swf_addfont(gfxdevice_t*dev, gfxfont_t*font)
 	l = l->next;
     }
     l = (fontlist_t*)rfx_calloc(sizeof(fontlist_t));
-    l->swffont = gfxfont_to_swffont(font, font->id);
+    l->swffont = gfxfont_to_swffont(font, font->id, (i->config_flashversion>=8 && !NO_FONT3)?3:2);
     l->next = 0;
     if(last) {
 	last->next = l;
@@ -2861,6 +3014,12 @@ static void swf_addfont(gfxdevice_t*dev, gfxfont_t*font)
 	msg("<debug> |   Maxascii: %d", l->swffont->maxascii);
 	msg("<debug> |   Style: %d", l->swffont->style);
 	msg("<debug> |   Encoding: %d", l->swffont->encoding);
+	if(l->swffont->layout) {
+	    msg("<debug> |   Ascent: %.2f", l->swffont->layout->ascent / 20.0);
+	    msg("<debug> |   Descent: %.2f", l->swffont->layout->descent / 20.0);
+	    msg("<debug> |   Leading: %.2f", l->swffont->layout->leading / 20.0);
+	}
+
 	for(iii=0; iii<l->swffont->numchars;iii++) {
 	    msg("<debug> |   Glyph %d) name=%s, unicode=%d size=%d bbox=(%.2f,%.2f,%.2f,%.2f)\n", iii, l->swffont->glyphnames?l->swffont->glyphnames[iii]:"<nonames>", l->swffont->glyph2ascii[iii], l->swffont->glyph[iii].shape->bitlen, 
 		    l->swffont->layout->bounds[iii].xmin/20.0,
@@ -2868,11 +3027,6 @@ static void swf_addfont(gfxdevice_t*dev, gfxfont_t*font)
 		    l->swffont->layout->bounds[iii].xmax/20.0,
 		    l->swffont->layout->bounds[iii].ymax/20.0
 		    );
-	    int t;
-	    for(t=0;t<l->swffont->maxascii;t++) {
-		if(l->swffont->ascii2glyph[t] == iii)
-		    msg("<debug> | - maps to %d",t);
-	    }
 	}
     }
 }
@@ -2896,6 +3050,56 @@ static void swf_switchfont(gfxdevice_t*dev, const char*fontid)
     return;
 }
 
+/* sets the matrix which is to be applied to characters drawn by swfoutput_drawchar() */
+static void setfontscale(gfxdevice_t*dev,double m11,double m12, double m21,double m22,double x, double y, char force)
+{
+    m11 *= 1024;
+    m12 *= 1024;
+    m21 *= 1024;
+    m22 *= 1024;
+    swfoutput_internal*i = (swfoutput_internal*)dev->internal;
+    if(i->lastfontm11 == m11 &&
+       i->lastfontm12 == m12 &&
+       i->lastfontm21 == m21 &&
+       i->lastfontm22 == m22 && !force)
+        return;
+   if(i->textmode)
+	endtext(dev);
+    
+    i->lastfontm11 = m11;
+    i->lastfontm12 = m12;
+    i->lastfontm21 = m21;
+    i->lastfontm22 = m22;
+
+    double xsize = sqrt(m11*m11 + m12*m12);
+    double ysize = sqrt(m21*m21 + m22*m22);
+
+    int extrazoom = 1;
+    if(i->config_flashversion>=8 && !NO_FONT3)
+	extrazoom = 20;
+
+    i->current_font_size = (xsize>ysize?xsize:ysize)*extrazoom;
+    if(i->current_font_size < 1)
+	i->current_font_size = 1;
+
+    MATRIX m;
+    swf_GetMatrix(0, &m);
+
+    if(m21 || m12 || fabs(m11+m22)>0.001 || m11<0) {
+	double ifs = (double)extrazoom/(i->current_font_size);
+	m.sx =  (S32)((m11*ifs)*65536); m.r1 = -(S32)((m21*ifs)*65536);
+	m.r0 =  (S32)((m12*ifs)*65536); m.sy = -(S32)((m22*ifs)*65536); 
+    }
+
+    /* this is the position of the first char to set a new fontmatrix-
+       we hope that it's close enough to all other characters using the
+       font, so we use its position as origin for the matrix */
+    m.tx = x*20;
+    m.ty = y*20;
+    i->fontmatrix = m;
+}
+
+
 static void swf_drawchar(gfxdevice_t*dev, gfxfont_t*font, int glyph, gfxcolor_t*color, gfxmatrix_t*matrix)
 {
     swfoutput_internal*i = (swfoutput_internal*)dev->internal;
@@ -2915,11 +3119,9 @@ static void swf_drawchar(gfxdevice_t*dev, gfxfont_t*font, int glyph, gfxcolor_t*
 
     if(!i->swffont || !i->swffont->name || strcmp((char*)i->swffont->name,font->id)) // not equal to current font
     {
-	/* TODO: remove the need for this (enhance getcharacterbbox so that it can cope
-		 with multiple fonts */
-	endtext(dev);
 	swf_switchfont(dev, font->id); // set the current font
     }
+
     if(!i->swffont) {
 	msg("<warning> swf_drawchar: Font is NULL");
 	return;
@@ -2928,6 +3130,7 @@ static void swf_drawchar(gfxdevice_t*dev, gfxfont_t*font, int glyph, gfxcolor_t*
 	msg("<warning> No character %d in font %s (%d chars)", glyph, FIXNULL((char*)i->swffont->name), i->swffont->numchars);
 	return;
     }
+    glyph = i->swffont->glyph2glyph[glyph];
     
     setfontscale(dev, matrix->m00, matrix->m01, matrix->m10, matrix->m11, matrix->tx, matrix->ty, 0);
     
@@ -2935,7 +3138,7 @@ static void swf_drawchar(gfxdevice_t*dev, gfxfont_t*font, int glyph, gfxcolor_t*
 	         i->fontmatrix.r0/65536.0 * i->fontmatrix.r1/65536.0;
     if(fabs(det) < 0.0005) { 
 	/* x direction equals y direction- the text is invisible */
-	msg("<verbose> Not drawing invisible character character %d (det=%f, m=[%f %f;%f %f]\n", glyph, 
+	msg("<verbose> Not drawing invisible character %d (det=%f, m=[%f %f;%f %f]\n", glyph, 
 		det,
 		i->fontmatrix.sx/65536.0, i->fontmatrix.r1/65536.0, 
 		i->fontmatrix.r0/65536.0, i->fontmatrix.sy/65536.0);
@@ -2965,13 +3168,28 @@ static void swf_drawchar(gfxdevice_t*dev, gfxfont_t*font, int glyph, gfxcolor_t*
     
     if(i->shapeid>=0)
 	endshape(dev);
-    if(i->textid<0)
-	starttext(dev);
+    
+    if(i->config_animate) {
+        endtext(dev);
+	i->tag = swf_InsertTag(i->tag,ST_SHOWFRAME);
+    }
 
+    if(!i->textmode)
+	starttext(dev);
+    
     msg("<trace> Drawing char %d in font %d at %d,%d in color %02x%02x%02x%02x", 
 	    glyph, i->swffont->id, x, y, color->r, color->g, color->b, color->a);
 
-    putcharacter(dev, i->swffont->id, glyph, x, y, i->current_font_size, *(RGBA*)color);
-    swf_FontUseGlyph(i->swffont, glyph);
+    if(color->a == 0 && i->config_invisibletexttofront) {
+	RGBA color2 = *(RGBA*)color;
+	if(i->config_flashversion>=8) {
+	    // use "multiply" blend mode
+	    color2.a = color2.r = color2.g = color2.b = 255;
+	}
+	i->topchardata = charbuffer_append(i->topchardata, i->swffont, glyph, x, y, i->current_font_size, color2, &i->fontmatrix);
+    } else {
+	i->chardata = charbuffer_append(i->chardata, i->swffont, glyph, x, y, i->current_font_size, *(RGBA*)color, &i->fontmatrix);
+    }
+    swf_FontUseGlyph(i->swffont, glyph, i->current_font_size);
     return;
 }

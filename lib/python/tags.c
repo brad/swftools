@@ -49,7 +49,7 @@ static PyObject* f_DefineFont(PyObject* self, PyObject* args, PyObject* kwargs)
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|s", kwlist, &filename))
 	return NULL;
 
-    font = swf_LoadFont(filename);
+    font = swf_LoadFont(filename, 0);
     if(!font) {
 	PyErr_SetString(PyExc_Exception, setError("Could not load %s", filename));
 	return NULL;
@@ -186,7 +186,7 @@ static PyObject* po_create(PyObject* self, PyObject* args, PyObject* kwargs,char
     po->depth = depth;
     po->clipdepth = clipdepth;
     po->ratio = ratio;
-    po->name = (unsigned char*)name;
+    po->name = name;
     po->move = move;
     if(clipdepth) po->clipdepth = clipdepth;
     if(matrix) po->matrix = matrix_getMatrix(matrix);
@@ -637,7 +637,7 @@ static PyObject* image_save(PyObject*self, PyObject*args)
     if(!PyArg_ParseTuple(args, "s", &filename))
 	return NULL;
 
-    writePNG(filename, (unsigned char*)fi->rgba ,fi->width, fi->height);
+    png_write(filename, (unsigned char*)fi->rgba ,fi->width, fi->height);
     
     return PY_NONE;
 }

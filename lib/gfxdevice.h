@@ -61,8 +61,8 @@ typedef struct _gfximage
     /* if the data contains an alpha layer (a != 255), the
        r,g,b values will have to be premultiplied */
     gfxcolor_t*data;
-    int width;
-    int height;
+    unsigned width;
+    unsigned height;
 } gfximage_t;
 
 /* gradients: A radial gradient will start at 0,0 and have a radius of 1,0 
@@ -111,14 +111,17 @@ typedef struct _gfxdevice
     void (*endclip)(struct _gfxdevice*dev);
     void (*stroke)(struct _gfxdevice*dev, gfxline_t*line, gfxcoord_t width, gfxcolor_t*color, gfx_capType cap_style, gfx_joinType joint_style, gfxcoord_t miterLimit);
     void (*fill)(struct _gfxdevice*dev, gfxline_t*line, gfxcolor_t*color);
+
+    /* expects alpha channel in image to be non-premultiplied */
     void (*fillbitmap)(struct _gfxdevice*dev, gfxline_t*line, gfximage_t*img, gfxmatrix_t*imgcoord2devcoord, gfxcxform_t*cxform); //cxform? tiling?
+
     void (*fillgradient)(struct _gfxdevice*dev, gfxline_t*line, gfxgradient_t*gradient, gfxgradienttype_t type, gfxmatrix_t*gradcoord2devcoord); //?
 
-    /* deprecated */ void (*addfont)(struct _gfxdevice*dev, gfxfont_t*font);
+    void (*addfont)(struct _gfxdevice*dev, gfxfont_t*font);
 
     void (*drawchar)(struct _gfxdevice*dev, gfxfont_t*font, int glyph, gfxcolor_t*color, gfxmatrix_t*matrix);
 
-    void (*drawlink)(struct _gfxdevice*dev, gfxline_t*line, const char*action);
+    void (*drawlink)(struct _gfxdevice*dev, gfxline_t*line, const char*action, const char*text);
     
     void (*endpage)(struct _gfxdevice*dev);
     

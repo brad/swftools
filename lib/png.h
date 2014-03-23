@@ -23,13 +23,17 @@
 extern "C" {
 #endif
 
-int getPNG(const char*sname, int*destwidth, int*destheight, unsigned char**destdata);
-int getPNGdimensions(const char*sname, int*destwidth, int*destheight);
+int png_apply_filter_32(unsigned char*dest, unsigned char*src, unsigned width, int y);
+void png_inverse_filter_32(int mode, unsigned char*src, unsigned char*old, unsigned char*dest, unsigned width);
 
-void savePNG(const char*filename, unsigned char*data, int width, int height, int numcolors);
+int png_load(const char*sname, unsigned*destwidth, unsigned*destheight, unsigned char**destdata);
+int png_getdimensions(const char*sname, unsigned*destwidth, unsigned*destheight);
 
-void writePNG(const char*filename, unsigned char*data, int width, int height);
-void writePalettePNG(const char*filename, unsigned char*data, int width, int height);
+void png_write_palette_based(const char*filename, unsigned char*data, unsigned width, unsigned height, int numcolors);
+
+void png_write(const char*filename, unsigned char*data, unsigned width, unsigned height);
+void png_write_quick(const char*filename, unsigned char*data, unsigned width, unsigned height);
+void png_write_palette_based_2(const char*filename, unsigned char*data, unsigned width, unsigned height);
 
 #ifdef __cplusplus
 }

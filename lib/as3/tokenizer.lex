@@ -110,10 +110,10 @@ void handleInclude(char*text, int len, char quotes)
     } else {
         int i1=0,i2=len;
         // find start
-        while(!strchr(" \n\r\t", text[i1])) i1++;
+        while(!strchr(" \n\r\t\xa0", text[i1])) i1++;
         // strip
-        while(strchr(" \n\r\t", text[i1])) i1++;
-        while(strchr(" \n\r\t", text[i2-1])) i2--;
+        while(strchr(" \n\r\t\xa0", text[i1])) i1++;
+        while(strchr(" \n\r\t\xa0", text[i2-1])) i2--;
         if(i2!=len) text[i2]=0;
         filename = strdup(&text[i1]);
     }
@@ -470,30 +470,13 @@ static inline void c() {
     current_column+=yyleng;
 }
 
-trie_t*active_namespaces = 0;
-/*void tokenizer_register_namespace(const char*id)
-{
-    trie_put(namespaces, id, 0);
-}
-void tokenizer_unregister_namespace(const char*id)
-{
-    trie_remove(namespaces, id);
-}*/
-static inline char tokenizer_is_namespace(const char*id)
-{
-    return trie_contains(active_namespaces, id);
-}
-
 static inline int handleIdentifier()
 {
     char*s = malloc(yyleng+1);
     memcpy(s, yytext, yyleng);
     s[yyleng]=0;
     a3_lval.id = s;
-    if(tokenizer_is_namespace(s)) 
-        return T_NAMESPACE;
-    else
-        return T_IDENTIFIER;
+    return T_IDENTIFIER;
 }
 static int tokenerror();
 
@@ -505,6 +488,7 @@ static int tokenerror();
 //XMLCOMMENT  <!--([^->]|(-/[^-])|(--/[^>]))*-->
 
 //{XMLCOMMENT}                 
+
 %}
 
 %s REGEXPOK
@@ -513,8 +497,20 @@ static int tokenerror();
 %x XMLTEXT
 %x XML
 
-NAME	 [a-zA-Z_][a-zA-Z0-9_\\]*
-_        [^a-zA-Z0-9_\\]
+X1 parsing identifiers with a non unicode lexer is a knightmare we have to skip all possible
+X2 combinations of byte order markers or utf8 space chars and i dont quite like the fact that
+X3 lex doesnt support proper comments in this section either...
+X4 {NAME_HEAD}{NAME_TAIL} 
+
+NAME_NOC2EF  [a-zA-Z_\x80-\xc1\xc3-\xee\xf0-\xff]
+NAME_EF      [\xef][a-zA-Z0-9_\\\x80-\xba\xbc-\xff]
+NAME_C2      [\xc2][a-zA-Z0-9_\\\x80-\x9f\xa1-\xff]
+NAME_EFBB    [\xef][\xbb][a-zA-Z0-9_\\\x80-\xbe\xc0-\xff]
+NAME_TAIL    [a-zA-Z_0-9\\\x80-\xff]*
+NAME_HEAD    (({NAME_NOC2EF})|({NAME_EF})|({NAME_C2})|({NAME_EFBB}))
+NAME	     {NAME_HEAD}{NAME_TAIL} 
+
+_            [^a-zA-Z0-9_\\\x80-\xff]
 
 HEXINT    0x[a-zA-Z0-9]+
 HEXFLOAT  0x[a-zA-Z0-9]*\.[a-zA-Z0-9]*
@@ -533,7 +529,7 @@ XMLID       [A-Za-z0-9_\x80-\xff]+([:][A-Za-z0-9_\x80-\xff]+)?
 XMLSTRING   ["][^"]*["]
 
 STRING   ["](\\[\x00-\xff]|[^\\"\n])*["]|['](\\[\x00-\xff]|[^\\'\n])*[']
-S 	 [ \n\r\t]
+S 	 ([ \n\r\t\xa0]|[\xc2][\xa0])
 MULTILINE_COMMENT [/][*]+([*][^/]|[^/*]|[^*][/]|[\x00-\x1f])*[*]+[/]
 SINGLELINE_COMMENT \/\/[^\n\r]*[\n\r]
 REGEXP   [/]([^/\n]|\\[/])*[/][a-zA-Z]*
@@ -545,7 +541,7 @@ REGEXP   [/]([^/\n]|\\[/])*[/][a-zA-Z]*
 [/][*]                       {syntaxerror("syntax error: unterminated comment", yytext);}
 
 ^include{S}+{STRING}{S}*/\n    {l();handleInclude(yytext, yyleng, 1);}
-^include{S}+[^" \t\r\n][\x20-\xff]*{S}*/\n    {l();handleInclude(yytext, yyleng, 0);}
+^include{S}+[^" \t\xa0\r\n][\x20-\xff]*{S}*/\n    {l();handleInclude(yytext, yyleng, 0);}
 {STRING}                     {l(); BEGIN(DEFAULT);handleString(yytext, yyleng);return T_STRING;}
 {CDATA}                      {l(); BEGIN(DEFAULT);handleCData(yytext, yyleng);return T_STRING;}
 
@@ -561,7 +557,7 @@ REGEXP   [/]([^/\n]|\\[/])*[/][a-zA-Z]*
 [>]                          {c(); return m('>');}
 [=]                          {c(); return m('=');}
 {XMLID}                      {c(); handleRaw(yytext, yyleng);return T_IDENTIFIER;}
-{S}                          {l();}
+{S}                          {l(); handleRaw(yytext, yyleng);return T_STRING;}
 <<EOF>>                      {syntaxerror("unexpected end of file");}
 }
 
@@ -586,7 +582,7 @@ REGEXP   [/]([^/\n]|\\[/])*[/][a-zA-Z]*
 <REGEXPOK>[\{]               {c(); BEGIN(REGEXPOK);return m(T_DICTSTART);}
 [\{]                         {c(); BEGIN(DEFAULT); return m('{');}
 
-\xef\xbb\xbf                 {/* utf 8 bom */}
+\xef\xbb\xbf                 {/* utf 8 bom (0xfeff) */}
 {S}                          {l();}
 
 {HEXINT}/{_}                 {c(); BEGIN(DEFAULT);return handlehex();}
@@ -730,7 +726,7 @@ static int tokenerror()
     if(c1>='0' && c1<='9')
         syntaxerror("syntax error: %s (identifiers must not start with a digit)");
     else
-        syntaxerror("syntax error [%d]: %s", (yy_start-1)/2, buf);
+        syntaxerror("syntax error [state=%d]: %s", (yy_start-1)/2, buf);
     printf("\n");
     exit(1);
     yyterminate();

@@ -38,6 +38,7 @@ typedef struct _gfxdrawer
     void (*moveTo)(struct _gfxdrawer*d, gfxcoord_t x, gfxcoord_t y);
     void (*lineTo)(struct _gfxdrawer*d, gfxcoord_t x, gfxcoord_t y);
     void (*splineTo)(struct _gfxdrawer*d, gfxcoord_t sx, gfxcoord_t sy, gfxcoord_t x, gfxcoord_t y);
+    void (*close)(struct _gfxdrawer*d);
     void* (*result)(struct _gfxdrawer*d);
 } gfxdrawer_t;
 
@@ -49,6 +50,7 @@ typedef struct _gfxpoint
 typedef struct _gfxfontlist
 {
     gfxfont_t*font;
+    void*user;
     struct _gfxfontlist*next;
 } gfxfontlist_t;
 
@@ -66,11 +68,18 @@ void gfxline_optimize(gfxline_t*line);
 void gfxdraw_cubicTo(gfxdrawer_t*draw, double c1x, double c1y, double c2x, double c2y, double x, double y, double quality);
 void gfxdraw_conicTo(gfxdrawer_t*draw, double cx, double cy, double tox, double toy, double quality);
 
+gfxline_t*gfxline_fromstring(const char*string);
+
 gfxbbox_t gfxline_getbbox(gfxline_t*line);
 gfxbbox_t gfxbbox_expand_to_point(gfxbbox_t box, gfxcoord_t x, gfxcoord_t y);
 void gfxbbox_intersect(gfxbbox_t*box1, gfxbbox_t*box2);
 
 void gfxline_transform(gfxline_t*line, gfxmatrix_t*matrix);
+
+/* tries to remove unnecessary moveTos from the gfxline */
+gfxline_t* gfxline_restitch(gfxline_t*line);
+/* reverses in place */
+gfxline_t* gfxline_reverse(gfxline_t*line);
 
 void gfxmatrix_dump(gfxmatrix_t*l, FILE*fi, char*prefix);
 void gfxmatrix_transform(gfxmatrix_t*m, gfxcoord_t* v1, gfxcoord_t*dest);
@@ -80,15 +89,37 @@ void gfxmatrix_multiply(gfxmatrix_t*m1, gfxmatrix_t*m2, gfxmatrix_t*dest);
 
 gfxfontlist_t* gfxfontlist_create();
 gfxfontlist_t*gfxfontlist_addfont(gfxfontlist_t*list, gfxfont_t*font);
+gfxfontlist_t*gfxfontlist_addfont2(gfxfontlist_t*list, gfxfont_t*font, void*user);
 gfxfont_t*gfxfontlist_findfont(gfxfontlist_t*list, char*id);
 char gfxfontlist_hasfont(gfxfontlist_t*list, gfxfont_t*font);
+void* gfxfontlist_getuserdata(gfxfontlist_t*list, const char*id);
 void gfxfontlist_free(gfxfontlist_t*list, char deletefonts);
 
 gfxbbox_t* gfxline_isrectangle(gfxline_t*_l);
+gfxbbox_t gfxbbox_expand_to_bbox(gfxbbox_t box, gfxbbox_t box2);
 
-gfxline_t*gfxline_makerectangle(int x1, int y1, int x2, int y2);
+gfxline_t*gfxline_makerectangle(double x1, double y1, double x2, double y2);
 gfxline_t*gfxline_makecircle(double x,double y,double rx, double ry);
 void gfxline_show(gfxline_t*line, FILE*fi);
+
+void gfxgradient_destroy(gfxgradient_t*gradient);
+
+typedef struct _gfxparam {
+    const char*key;
+    const char*value;
+    struct _gfxparam* next;
+} gfxparam_t;
+typedef struct _gfxparams {
+    gfxparam_t*params;
+    gfxparam_t*last;
+} gfxparams_t;
+gfxparams_t* gfxparams_new();
+void gfxparams_store(gfxparams_t*params, const char*name, const char*value);
+void gfxparams_free(gfxparams_t*params);
+
+void gfxline_normalize(gfxline_t*line, double sizex, double sizey);
+
+gfxbbox_t gfxbbox_transform(gfxbbox_t*bbox, gfxmatrix_t*m);
 
 #ifdef __cplusplus
 }

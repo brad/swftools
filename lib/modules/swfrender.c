@@ -680,8 +680,6 @@ static void fill_gradient(RGBA*line, int*z, int y, int x1, int x2, MATRIX*m, GRA
 	    RGBA col;
 	    double xx = (  (x - rx) * m22 - (y - ry) * m21)*det;
 	    double yy = (- (x - rx) * m12 + (y - ry) * m11)*det;
-	    int ainv;
-	    ainv = 255-col.a;
 
 	    if(type == FILL_LINEAR) {
 		int xr = xx*256;
@@ -698,7 +696,8 @@ static void fill_gradient(RGBA*line, int*z, int y, int x1, int x2, MATRIX*m, GRA
 		    xr = 511;
 		col = palette[xr];
 	    }
-
+	    int ainv;
+	    ainv = 255-col.a;
 	    line[x].r = clamp(((line[x].r*ainv)>>8)+col.r);
 	    line[x].g = clamp(((line[x].g*ainv)>>8)+col.g);
 	    line[x].b = clamp(((line[x].b*ainv)>>8)+col.b);
@@ -833,7 +832,7 @@ static void change_state(int y, state_t* state, renderpoint_t*p)
     layer_t*before=0, *self=0, *after=0;
 
     if(DEBUG&2) { 
-        printf("[(%d,%d)/%d/%d-%d]", p->x, y, p->depth, p->shapeline->fillstyle0, p->shapeline->fillstyle1);
+        printf("[(%f,%d)/%d/%d-%d]", p->x, y, p->depth, p->shapeline->fillstyle0, p->shapeline->fillstyle1);
     }
 
     search_layer(state, p->depth, &before, &self, &after);

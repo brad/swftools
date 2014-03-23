@@ -8,12 +8,21 @@ ln -s ./ ${name}
 cd lib/action;make generated >/dev/null 2>&1;cd ../..
 
 SOURCES="${name}/src/swfcombine.1 \
-${name}/src/swfstrings.1 ${name}/src/swfdump.1 ${name}/src/swfextract.1 \
-${name}/src/jpeg2swf.1 ${name}/src/png2swf.1 ${name}/src/pdf2swf.1 \
-${name}/src/gif2swf.1 ${name}/src/wav2swf.1 ${name}/src/swfc.1 \
-${name}/src/swfbbox.1 ${name}/src/font2swf.1 ${name}/src/swfrender.1 \
+${name}/src/swfstrings.1 \
+${name}/src/swfdump.1 \
+${name}/src/swfextract.1 \
+${name}/src/jpeg2swf.1 \
+${name}/src/png2swf.1 \
+${name}/src/pdf2swf.1 \
+${name}/src/gif2swf.1 \
+${name}/src/wav2swf.1 \
+${name}/src/swfc.1 \
+${name}/src/swfbbox.1 \
+${name}/src/font2swf.1 \
+${name}/src/swfrender.1 \
 ${name}/src/as3compile.1 \
 ${name}/src/swfbytes.1 \
+${name}/src/pdf2pdf.1 \
 ${name}/src/swfcombine.c \
 ${name}/src/swfstrings.c \
 ${name}/src/swfdump.c \
@@ -21,10 +30,13 @@ ${name}/src/font2swf.c \
 ${name}/src/swfbbox.c \
 ${name}/src/swfextract.c \
 ${name}/src/jpeg2swf.c \
+${name}/src/ttftool.c \
 ${name}/src/png2swf.c \
 ${name}/src/gif2swf.c \
 ${name}/src/wav2swf.c \
 ${name}/src/pdf2swf.c \
+${name}/src/pdf2pdf.c \
+${name}/lib/pdf/pdf2jpeg.c \
 ${name}/src/swfc.c \
 ${name}/src/swfc-feedback.c \
 ${name}/src/swfc-history.c \
@@ -59,7 +71,6 @@ ${name}/avi2swf/avi2swf.1"
 
 MAKEFILES="${name}/src/Makefile.in \
 ${name}/lib/readers/Makefile.in \
-${name}/lib/art/Makefile.in \
 ${name}/lib/Makefile.in \
 ${name}/avi2swf/Makefile.in \
 ${name}/lib/pdf/Makefile.in \
@@ -82,18 +93,23 @@ ${name}/lib/q.c \
 ${name}/lib/q.h \
 ${name}/lib/utf8.c \
 ${name}/lib/utf8.h \
-${name}/lib/MD5.h \
-${name}/lib/MD5.c \
+${name}/lib/base64.c \
+${name}/lib/base64.h \
 ${name}/lib/png.h \
 ${name}/lib/png.c \
 ${name}/lib/jpeg.h \
 ${name}/lib/jpeg.c \
+${name}/lib/kdtree.h \
+${name}/lib/kdtree.c \
 ${name}/lib/drawer.c \
 ${name}/lib/drawer.h \
 ${name}/lib/mem.c \
-${name}/lib/mem.h
+${name}/lib/mem.h \
+${name}/lib/graphcut.c \
+${name}/lib/graphcut.h \
 ${name}/lib/modules/swffilter.c \
 ${name}/lib/modules/swfrender.c \
+${name}/lib/modules/swfalignzones.c \
 ${name}/lib/readers/swf.c \
 ${name}/lib/readers/swf.h \
 ${name}/lib/readers/image.c \
@@ -103,32 +119,6 @@ ${name}/lib/modules/swfobject.c \
 ${name}/lib/modules/swfshape.c \
 ${name}/lib/modules/swftext.c \
 ${name}/lib/modules/swffont.c \
-${name}/lib/gocr/box.c \
-${name}/lib/gocr/database.c \
-${name}/lib/gocr/detect.c \
-${name}/lib/gocr/gocr.h \
-${name}/lib/gocr/job.c \
-${name}/lib/gocr/lines.c \
-${name}/lib/gocr/list.c \
-${name}/lib/gocr/list.h \
-${name}/lib/gocr/ocr0.c \
-${name}/lib/gocr/ocr0.h \
-${name}/lib/gocr/ocr0n.c \
-${name}/lib/gocr/ocr1.c \
-${name}/lib/gocr/ocr1.h \
-${name}/lib/gocr/otsu.c \
-${name}/lib/gocr/otsu.h \
-${name}/lib/gocr/output.c \
-${name}/lib/gocr/output.h \
-${name}/lib/gocr/pgm2asc.c \
-${name}/lib/gocr/pgm2asc.h \
-${name}/lib/gocr/pixel.c \
-${name}/lib/gocr/pnm.h \
-${name}/lib/gocr/progress.c \
-${name}/lib/gocr/progress.h \
-${name}/lib/gocr/remove.c \
-${name}/lib/gocr/unicode.c \
-${name}/lib/gocr/unicode.h \
 ${name}/lib/gfxfont.h \
 ${name}/lib/gfxfont.c \
 ${name}/lib/modules/swfbutton.c \
@@ -140,8 +130,18 @@ ${name}/lib/mp3.c \
 ${name}/lib/wav.c \
 ${name}/lib/wav.h \
 ${name}/lib/mp3.h \
+${name}/lib/xml.h \
+${name}/lib/xml.c \
+${name}/lib/ttf.h \
+${name}/lib/ttf.c \
 ${name}/lib/modules/swfdraw.c \
 ${name}/lib/modules/swfaction.c \
+${name}/lib/as3/parser_help.h \
+${name}/lib/as3/parser_help.c \
+${name}/lib/as3/state.h \
+${name}/lib/as3/state.c \
+${name}/lib/as3/assets.c \
+${name}/lib/as3/assets.h \
 ${name}/lib/as3/code.c \
 ${name}/lib/as3/code.h \
 ${name}/lib/as3/import.c \
@@ -201,14 +201,36 @@ ${name}/lib/log.c \
 ${name}/lib/log.h \
 ${name}/lib/os.c \
 ${name}/lib/os.h \
+${name}/lib/gfximage.c \
+${name}/lib/gfximage.h \
 ${name}/lib/gfxdevice.h \
 ${name}/lib/gfxsource.h \
 ${name}/lib/gfxtools.h \
 ${name}/lib/gfxpoly.h \
 ${name}/lib/gfxtools.c \
-${name}/lib/gfxpoly.c \
-${name}/lib/devices/ocr.h \
-${name}/lib/devices/ocr.c \
+${name}/lib/gfxfilter.h \
+${name}/lib/gfxfilter.c \
+${name}/lib/gfxpoly/active.c \
+${name}/lib/gfxpoly/active.h \
+${name}/lib/gfxpoly/convert.c \
+${name}/lib/gfxpoly/convert.h \
+${name}/lib/gfxpoly/poly.c \
+${name}/lib/gfxpoly/poly.h \
+${name}/lib/gfxpoly/renderpoly.c \
+${name}/lib/gfxpoly/renderpoly.h \
+${name}/lib/gfxpoly/stroke.c \
+${name}/lib/gfxpoly/stroke.h \
+${name}/lib/gfxpoly/wind.c \
+${name}/lib/gfxpoly/wind.h \
+${name}/lib/gfxpoly/xrow.c \
+${name}/lib/gfxpoly/xrow.h \
+${name}/lib/gfxpoly/moments.c \
+${name}/lib/gfxpoly/moments.h \
+${name}/lib/gfxpoly/heap.h \
+${name}/lib/pdf/bbox.c \
+${name}/lib/pdf/bbox.h \
+${name}/lib/kdtree.c \
+${name}/lib/kdtree.h \
 ${name}/lib/devices/swf.h \
 ${name}/lib/devices/swf.c \
 ${name}/lib/devices/file.h \
@@ -217,6 +239,8 @@ ${name}/lib/devices/render.c \
 ${name}/lib/devices/render.h \
 ${name}/lib/devices/text.c \
 ${name}/lib/devices/text.h \
+${name}/lib/devices/pdf.c \
+${name}/lib/devices/pdf.h \
 ${name}/lib/devices/polyops.c \
 ${name}/lib/devices/polyops.h \
 ${name}/lib/devices/record.c \
@@ -231,19 +255,36 @@ ${name}/lib/devices/bbox.c \
 ${name}/lib/devices/bbox.h \
 ${name}/lib/devices/ops.c \
 ${name}/lib/devices/ops.h \
-${name}/lib/pdf/GFXOutputDev.h \
-${name}/lib/pdf/GFXOutputDev.cc \
+${name}/lib/filters/alpha.c \
+${name}/lib/filters/one_big_font.c \
+${name}/lib/filters/vectors_to_glyphs.c \
+${name}/lib/filters/remove_font_transforms.c \
+${name}/lib/filters/remove_invisible_characters.c \
+${name}/lib/filters/flatten.c \
+${name}/lib/filters/rescale_images.c \
+${name}/lib/pdf/popplercompat.cc \
+${name}/lib/pdf/popplercompat.h \
+${name}/lib/pdf/VectorGraphicOutputDev.h \
+${name}/lib/pdf/VectorGraphicOutputDev.cc \
+${name}/lib/pdf/CharOutputDev.h \
+${name}/lib/pdf/CharOutputDev.cc \
+${name}/lib/pdf/CommonOutputDev.h \
+${name}/lib/pdf/CommonOutputDev.cc \
 ${name}/lib/pdf/BitmapOutputDev.h \
 ${name}/lib/pdf/FullBitmapOutputDev.h \
 ${name}/lib/pdf/BitmapOutputDev.cc \
 ${name}/lib/pdf/FullBitmapOutputDev.cc \
 ${name}/lib/pdf/InfoOutputDev.h \
 ${name}/lib/pdf/InfoOutputDev.cc \
+${name}/lib/pdf/XMLOutputDev.h \
+${name}/lib/pdf/XMLOutputDev.cc \
 ${name}/lib/pdf/CommonOutputDev.h \
 ${name}/lib/pdf/fonts.c \
 ${name}/lib/pdf/fonts.h \
 ${name}/lib/pdf/pdf.cc \
 ${name}/lib/pdf/pdf.h \
+${name}/lib/pdf/popplercompat.cc \
+${name}/lib/pdf/popplercompat.h \
 ${name}/lib/pdf/xpdf/Annot.cc \
 ${name}/lib/pdf/xpdf/Annot.h \
 ${name}/lib/pdf/xpdf/Array.cc \
@@ -295,6 +336,8 @@ ${name}/lib/pdf/xpdf/Link.h \
 ${name}/lib/pdf/xpdf/NameToCharCode.cc \
 ${name}/lib/pdf/xpdf/NameToCharCode.h \
 ${name}/lib/pdf/xpdf/NameToUnicodeTable.h \
+${name}/lib/pdf/xpdf/UnicodeTypeTable.cc \
+${name}/lib/pdf/xpdf/UnicodeTypeTable.h \
 ${name}/lib/pdf/xpdf/Object.cc \
 ${name}/lib/pdf/xpdf/Object.h \
 ${name}/lib/pdf/xpdf/OutputDev.cc \
@@ -318,8 +361,6 @@ ${name}/lib/pdf/xpdf/XRef.cc \
 ${name}/lib/pdf/xpdf/XRef.h \
 ${name}/lib/pdf/aconf.h \
 ${name}/lib/pdf/xpdf/config.h \
-${name}/lib/art/art_config.h \
-${name}/lib/art/config.h \
 ${name}/lib/pdf/xpdf/gfile.cc \
 ${name}/lib/pdf/xpdf/gfile.h \
 ${name}/lib/pdf/xpdf/gmem.cc \
@@ -371,6 +412,8 @@ ${name}/lib/pdf/xpdf/SplashGlyphBitmap.h \
 ${name}/lib/pdf/xpdf/SplashMath.h \
 ${name}/lib/pdf/xpdf/SplashOutputDev.cc \
 ${name}/lib/pdf/xpdf/SplashOutputDev.h \
+${name}/lib/pdf/xpdf/TextOutputDev.cc \
+${name}/lib/pdf/xpdf/TextOutputDev.h \
 ${name}/lib/pdf/xpdf/SplashPath.cc \
 ${name}/lib/pdf/xpdf/SplashPath.h \
 ${name}/lib/pdf/xpdf/SplashPattern.cc \
@@ -389,89 +432,7 @@ ${name}/lib/pdf/xpdf/SplashTypes.h \
 ${name}/lib/pdf/xpdf/SplashXPath.cc \
 ${name}/lib/pdf/xpdf/SplashXPath.h \
 ${name}/lib/pdf/xpdf/SplashXPathScanner.cc \
-${name}/lib/pdf/xpdf/SplashXPathScanner.h \
-${name}/lib/art/art_affine.h \
-${name}/lib/art/art_alphagamma.h \
-${name}/lib/art/art_bpath.h \
-${name}/lib/art/art_filterlevel.h \
-${name}/lib/art/art_gray_svp.h \
-${name}/lib/art/art_misc.h \
-${name}/lib/art/art_pathcode.h \
-${name}/lib/art/art_pixbuf.h \
-${name}/lib/art/art_point.h \
-${name}/lib/art/art_rect.h \
-${name}/lib/art/art_rect_svp.h \
-${name}/lib/art/art_rect_uta.h \
-${name}/lib/art/art_render.h \
-${name}/lib/art/art_render_gradient.h \
-${name}/lib/art/art_render_mask.h \
-${name}/lib/art/art_render_svp.h \
-${name}/lib/art/art_rgb.h \
-${name}/lib/art/art_rgb_a_affine.h \
-${name}/lib/art/art_rgb_affine.h \
-${name}/lib/art/art_rgb_affine_private.h \
-${name}/lib/art/art_rgb_bitmap_affine.h \
-${name}/lib/art/art_rgb_pixbuf_affine.h \
-${name}/lib/art/art_rgb_rgba_affine.h \
-${name}/lib/art/art_rgb_svp.h \
-${name}/lib/art/art_rgba.h \
-${name}/lib/art/art_svp.h \
-${name}/lib/art/art_svp_intersect.h \
-${name}/lib/art/art_svp_ops.h \
-${name}/lib/art/art_svp_point.h \
-${name}/lib/art/art_svp_render_aa.h \
-${name}/lib/art/art_svp_vpath.h \
-${name}/lib/art/art_svp_vpath_stroke.h \
-${name}/lib/art/art_svp_wind.h \
-${name}/lib/art/art_uta.h \
-${name}/lib/art/art_uta_ops.h \
-${name}/lib/art/art_uta_rect.h \
-${name}/lib/art/art_uta_svp.h \
-${name}/lib/art/art_uta_vpath.h \
-${name}/lib/art/art_vpath.h \
-${name}/lib/art/art_vpath_bpath.h \
-${name}/lib/art/art_vpath_dash.h \
-${name}/lib/art/art_vpath_svp.h \
-${name}/lib/art/libart.h \
-${name}/lib/art/art_affine.c \
-${name}/lib/art/art_alphagamma.c \
-${name}/lib/art/art_bpath.c \
-${name}/lib/art/art_gray_svp.c \
-${name}/lib/art/art_misc.c \
-${name}/lib/art/art_pixbuf.c \
-${name}/lib/art/art_rect.c \
-${name}/lib/art/art_rect_svp.c \
-${name}/lib/art/art_rect_uta.c \
-${name}/lib/art/art_render.c \
-${name}/lib/art/art_render_gradient.c \
-${name}/lib/art/art_render_mask.c \
-${name}/lib/art/art_render_svp.c \
-${name}/lib/art/art_rgb.c \
-${name}/lib/art/art_rgb_affine.c \
-${name}/lib/art/art_rgb_a_affine.c \
-${name}/lib/art/art_rgb_affine_private.c \
-${name}/lib/art/art_rgb_bitmap_affine.c \
-${name}/lib/art/art_rgb_pixbuf_affine.c \
-${name}/lib/art/art_rgb_rgba_affine.c \
-${name}/lib/art/art_rgb_svp.c \
-${name}/lib/art/art_rgba.c \
-${name}/lib/art/art_svp.c \
-${name}/lib/art/art_svp_intersect.c \
-${name}/lib/art/art_svp_ops.c \
-${name}/lib/art/art_svp_point.c \
-${name}/lib/art/art_svp_render_aa.c \
-${name}/lib/art/art_svp_vpath.c \
-${name}/lib/art/art_svp_vpath_stroke.c \
-${name}/lib/art/art_svp_wind.c \
-${name}/lib/art/art_uta.c \
-${name}/lib/art/art_uta_ops.c \
-${name}/lib/art/art_uta_rect.c \
-${name}/lib/art/art_uta_svp.c \
-${name}/lib/art/art_uta_vpath.c \
-${name}/lib/art/art_vpath.c \
-${name}/lib/art/art_vpath_bpath.c \
-${name}/lib/art/art_vpath_dash.c \
-${name}/lib/art/art_vpath_svp.c"
+${name}/lib/pdf/xpdf/SplashXPathScanner.h"
 
 PYTHON="${name}/lib/python/Makefile.in \
 ${name}/lib/python/SWF.c \
@@ -494,9 +455,10 @@ ${name}/lib/python/tagmap.c \
 ${name}/lib/python/tagmap.h \
 ${name}/setup.py"
 
-WXPDF2SWF=" \
-${name}/wx/pdf2swf.py \
-${name}/wx/images.py"
+WXPDF2SWF="" #TODO
+#WXPDF2SWF=" \
+#${name}/wx/pdf2swf.py \
+#${name}/wx/images.py"
 
 CONFIGURE="${name}/configure.in \
 ${name}/configure \
@@ -518,8 +480,7 @@ ${name}/missing \
 ${name}/ltmain.sh"
 
 DOC="${name}/doc/fileformat.sc \
-${name}/ChangeLog \
-${name}/FAQ"
+${name}/ChangeLog"
 
 tar -chf ${name}.tar \
 ${SOURCES} ${AVI2SWF} ${MAKEFILES} ${DOC} ${LIB} ${PYTHON} ${WXPDF2SWF} ${CONFIGURE} \

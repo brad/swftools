@@ -9,7 +9,11 @@
 #define ACONF_H
 #include "../../config.h"
 
+#define SYSTEM_XPDFRC "/etc/xpdf/xpdfrc"
+
 #define HAVE_STRINGS_H 1
+
+#define TEXTOUT_WORD_LIST 1
 
 // todo:
 //

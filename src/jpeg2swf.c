@@ -31,7 +31,7 @@
 #define MAX_INPUT_FILES 1024
 #define VERBOSE(x) (global.verbose>=x)
 
-struct {
+static struct {
     int quality;
     float framerate;
     int max_image_width;
@@ -632,7 +632,7 @@ int main(int argc, char **argv)
 	int i;
 	for (i = 0; i < global.nfiles; i++) {
 	    if (VERBOSE(3))
-		fprintf(stderr, "[%03i] %s (%i%%, 1/%i)\n", i,
+		fprintf(stderr, "[%03i] %s (%i%%)\n", i,
 			image[i].filename, image[i].quality);
 	    t = MovieAddFrame(&swf, t, image[i].filename, image[i].quality,
 			      image[i].width, image[i].height);

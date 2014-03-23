@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include <assert.h>
 #include "../gfxdevice.h"
 #include "../gfxsource.h"
@@ -52,22 +53,17 @@ typedef struct _sprite
     int frameCount;
 } sprite_t;
 
-struct _render
+typedef struct _render
 {
     map16_t*id2char;
     gfxdevice_t*device;
     MATRIX m;
     int clips;
     int*clips_waiting;
-};
-typedef struct _render render_t;
 
+    placement_t*current_placement;
+} render_t;
 
-static void placement_free(placement_t*p)
-{
-    swf_PlaceObjectFree(&p->po);
-    free(p);
-}
 
 //---- object/depth handling ----
 
@@ -91,7 +87,7 @@ void map16_free(map16_t*map)
 void map16_add_id(map16_t*map, int nr, void*id)
 {
     if(map->ids[nr])
-	fprintf(stderr, "Warning: ID %d defined more than once\n");
+	fprintf(stderr, "Warning: ID %d defined more than once\n", nr);
     map->ids[nr] = id;
 }
 void map16_remove_id(map16_t*map, int nr)
@@ -107,6 +103,29 @@ void map16_enumerate(map16_t*map, void (*f)(void*self, int id, void*data), void*
 	}
     }
 }
+//---- placements ----
+
+placement_t* placement_unit()
+{
+    placement_t*placement = rfx_calloc(sizeof(placement_t));
+    swf_GetPlaceObject(0, &placement->po);
+    return placement;
+}
+
+placement_t* placement_join(placement_t*p1, placement_t*p2)
+{
+    placement_t*placement = rfx_alloc(sizeof(placement_t));
+    *placement = *p1;
+    swf_MatrixJoin(&placement->po.matrix, &p1->po.matrix, &p2->po.matrix);
+    return placement;
+}
+
+static void placement_free(placement_t*p)
+{
+    swf_PlaceObjectFree(&p->po);
+    free(p);
+}
+
 //---- conversion stuff ----
 
 static void convertMatrix(MATRIX*from, gfxmatrix_t*to)
@@ -148,21 +167,27 @@ static gfxgradient_t* convertGradient(GRADIENT*from)
 gfxline_t* swfline_to_gfxline(SHAPELINE*line, int linestyle, int fillstyle0)
 {
     gfxdrawer_t d;
-    SCOORD x=0,y=0;
+    SCOORD x=0,y=0,xx=0,yy=0;
     gfxline_t*l;
     gfxdrawer_target_gfxline(&d);
     if(line && line->type != moveTo) {
 	fprintf(stderr, "Warning: Shape doesn't start with a moveTo\n");
     }
+    xx = line?line->x+1:0;
     while(line) {
-	if(line->fillstyle0 == fillstyle0 || line->fillstyle1 == fillstyle0 || 
+	if(line->fillstyle0 == fillstyle0 || 
+	   line->fillstyle1 == fillstyle0 || 
 	   line->linestyle == linestyle) {
 	    if(line->type == lineTo) {
-		d.moveTo(&d, x/20.0,y/20.0);
+		if(xx!=x || yy!=y) d.moveTo(&d, x/20.0,y/20.0);
 		d.lineTo(&d, line->x/20.0,line->y/20.0);
+		xx = line->x;
+		yy = line->y;
 	    } else if(line->type == splineTo) {
-		d.moveTo(&d, x/20.0,y/20.0);
+		if(xx!=x || yy!=y) d.moveTo(&d, x/20.0,y/20.0);
 		d.splineTo(&d, line->sx/20.0, line->sy/20.0, line->x/20.0,line->y/20.0);
+		xx = line->x;
+		yy = line->y;
 	    }
 	}
 	x = line->x;
@@ -176,20 +201,13 @@ gfxline_t* swfline_to_gfxline(SHAPELINE*line, int linestyle, int fillstyle0)
 
 //---- bitmap handling ----
 
-gfximage_t* gfximage_new(RGBA*data, int width, int height)
+static gfximage_t* gfximage_new(RGBA*data, int width, int height)
 {
     gfximage_t* b = (gfximage_t*)rfx_calloc(sizeof(gfximage_t));
     b->data = (gfxcolor_t*)data;
     b->width = width;
     b->height = height;
     return b;
-}
-
-void gfximage_free(gfximage_t*b)
-{
-    free(b->data); //!
-    b->data = 0;
-    free(b);
 }
 
 static gfximage_t* findimage(render_t*r, U16 id)
@@ -200,7 +218,7 @@ static gfximage_t* findimage(render_t*r, U16 id)
 
     /*char filename[80];
     sprintf(filename, "bitmap%d.png", id);
-    writePNG(filename, (unsigned char*)img->data, img->width, img->height);
+    png_write(filename, (unsigned char*)img->data, img->width, img->height);
     printf("saving bitmap %d to %s\n", id, filename);*/
 
     return c->data;
@@ -227,7 +245,15 @@ static void renderFilled(render_t*r, gfxline_t*line, FILLSTYLE*f, CXFORM*cx, MAT
     } else if(f->type == FILL_LINEAR || f->type == FILL_RADIAL) {
 	gfxmatrix_t m;
 	gfxgradient_t* g;
-	convertMatrix(&f->m, &m);
+	MATRIX* m2 = &f->m;
+	//swf_MatrixJoin(&m2, po_m, &f->m);
+
+	double z = f->type==FILL_RADIAL?4:4;
+	m.m00 = m2->sx/z/20.0; m.m10 = m2->r1/z/20.0;
+	m.m01 = m2->r0/z/20.0; m.m11 = m2->sy/z/20.0;
+	m.tx = m2->tx/20.0;
+	m.ty = m2->ty/20.0;
+
 	g = convertGradient(&f->gradient);
 	r->device->fillgradient(r->device, line, g, f->type == FILL_LINEAR ? gfxgradient_linear : gfxgradient_radial, &m);
 	free(g);
@@ -332,7 +358,8 @@ static map16_t* extractDefinitions(SWF*swf)
 	    map16_add_id(map, id, c);
 	}
 	else if(tag->id == ST_DEFINEFONT ||
-		tag->id == ST_DEFINEFONT2) {
+		tag->id == ST_DEFINEFONT2 ||
+		tag->id == ST_DEFINEFONT3) {
 	    character_t*c = rfx_calloc(sizeof(character_t));
 	    SWFFONT*swffont = 0;
 	    font_t*font = (font_t*)rfx_calloc(sizeof(font_t));
@@ -347,6 +374,10 @@ static map16_t* extractDefinitions(SWF*swf)
                 }
                 SHAPE2*s2 = swf_ShapeToShape2(swffont->glyph[t].shape);
                 font->glyphs[t] = swfline_to_gfxline(s2->lines, 0, 1);
+		if(tag->id==ST_DEFINEFONT3) {
+		    gfxmatrix_t m = {1/20.0,0,0, 0,1/20.0,0};
+		    gfxline_transform(font->glyphs[t], &m);
+		}
                 swf_Shape2Free(s2);
             }
             swf_FontFree(swffont);
@@ -409,9 +440,6 @@ static map16_t* extractFrame(TAG*startTag, int frame_to_extract)
     int frame = 1;
     int insprite = 0;
 
-    SWF*swf = rfx_calloc(sizeof(SWF));
-    swf->firstTag = startTag;
-
     for(;tag;tag = tag->next) {
 	if(tag->id == ST_DEFINESPRITE) {
 	    while(tag->id != ST_END)
@@ -426,12 +454,16 @@ static map16_t* extractFrame(TAG*startTag, int frame_to_extract)
             swf_GetPlaceObject(tag, &p->po);
 	    if(p->po.move) {
 		placement_t*old = (placement_t*)map16_get_id(depthmap, p->po.depth);
-		p->po.id = old->po.id;
-		map16_remove_id(depthmap, p->po.depth);
-		placement_free(p);
-	    } else {
-		map16_add_id(depthmap, p->po.depth, p);
+	
+		if(!(p->po.flags&PF_CHAR)) p->po.id = old->po.id;
+		if(!(p->po.flags&PF_MATRIX)) p->po.matrix = old->po.matrix;
+		if(!(p->po.flags&PF_CXFORM)) p->po.cxform = old->po.cxform;
+		if(!(p->po.flags&PF_RATIO)) p->po.ratio = old->po.ratio;
+
+		map16_remove_id(depthmap, old->po.depth);
+		placement_free(old);
 	    }
+	    map16_add_id(depthmap, p->po.depth, p);
 	}
 	if(tag->id == ST_REMOVEOBJECT ||
 	   tag->id == ST_REMOVEOBJECT2) {
@@ -481,9 +513,15 @@ void swf_ApplyMatrixToShape(SHAPE2*shape, MATRIX*m)
     SHAPELINE*line = shape->lines;
     while(line) {
 	SPOINT p;
+	
 	p.x = line->x; p.y = line->y;
 	p = swf_TurnPoint(p, m);
 	line->x = p.x; line->y = p.y;
+	
+	p.x = line->sx; p.y = line->sy;
+	p = swf_TurnPoint(p, m);
+	line->sx = p.x; line->sy = p.y;
+
 	line = line->next;
     }
 }
@@ -493,11 +531,22 @@ static void renderCharacter(render_t*r, placement_t*p, character_t*c)
     if(c->type == TYPE_SHAPE) {
 	SHAPE2 shape;
 	swf_ParseDefineShape(c->tag, &shape);
-	MATRIX m;
-	swf_MatrixJoin(&m, &r->m, &p->po.matrix);
+
+	MATRIX m,m2;
+	swf_MatrixJoin(&m2, &r->m, &r->current_placement->po.matrix);
+	swf_MatrixJoin(&m, &m2, &p->po.matrix);
+
 	swf_ApplyMatrixToShape(&shape, &m);
+
 	SHAPELINE*line = shape.lines;
 	int t;
+	
+	for(t=1;t<=shape.numlinestyles;t++) {
+	   gfxline_t*line = swfline_to_gfxline(shape.lines, t, -1);
+	   if(line) renderOutline(r, line, &shape.linestyles[t-1], &p->po.cxform);
+	   gfxline_free(line);
+	}
+
 	for(t=1;t<=shape.numfillstyles;t++) {
 	   gfxline_t*line;
 	   line = swfline_to_gfxline(shape.lines, -1, t);
@@ -514,11 +563,7 @@ static void renderCharacter(render_t*r, placement_t*p, character_t*c)
 	   if(line) renderFilled(r, line, &shape.fillstyles[t-1], &p->po.cxform);
 	   gfxline_free(line);*/
 	}
-	for(t=1;t<=shape.numlinestyles;t++) {
-	   gfxline_t*line = swfline_to_gfxline(shape.lines, t, -1);
-	   if(line) renderOutline(r, line, &shape.linestyles[t-1], &p->po.cxform);
-	   gfxline_free(line);
-	}
+	
     } else if(c->type == TYPE_TEXT) {
         TAG* tag = c->tag;
         textcallbackblock_t info;
@@ -542,17 +587,23 @@ static void placeObject(void*self, int id, void*data)
     render_t*r = (render_t*)self;
     placement_t*p = (placement_t*)data;
     character_t*c = map16_get_id(r->id2char, p->po.id);
+    
     if(!c)  {
         fprintf(stderr, "Error: ID %d unknown\n", p->po.id);
         return;
     }
+    
     if(c->type == TYPE_SPRITE) {
+	placement_t*oldp = r->current_placement;
+	r->current_placement = placement_join(oldp, p);
+
         int*old_clips_waiting = r->clips_waiting;
         r->clips_waiting = rfx_calloc(sizeof(r->clips_waiting[0])*65536);
 
         sprite_t* s = (sprite_t*)c->data;
 
-        map16_t* depths = extractFrame(c->tag->next, p->age % s->frameCount);
+	TAG*spritetags = c->tag->next;
+        map16_t* depths = extractFrame(spritetags, s->frameCount>0? p->age % s->frameCount : 0);
         map16_enumerate(depths, placeObject, r);
        
         int t;
@@ -564,9 +615,12 @@ static void placeObject(void*self, int id, void*data)
         }
         free(r->clips_waiting);
         r->clips_waiting = old_clips_waiting;
-        return;
+
+	placement_free(r->current_placement);
+	r->current_placement = oldp;
+    } else {
+	renderCharacter(r, p, c);
     }
-    renderCharacter(r, p, c);
 }
 
 void swfpage_destroy(gfxpage_t*swf_page)
@@ -587,19 +641,18 @@ void swfpage_render(gfxpage_t*page, gfxdevice_t*output)
     r.device = output;
     r.m = pi->m;
     r.clips_waiting = malloc(sizeof(r.clips_waiting[0])*65536);
+    r.current_placement = placement_unit();
     memset(r.clips_waiting, 0, sizeof(r.clips_waiting[0])*65536);
 
     int t;
     for(t=0;t<65536;t++) {
-        int i;
-
-        for(i=0; i<r.clips_waiting[t]; i++) {
-            output->endclip(output);
-        }
-
 	if(depths->ids[t]) {
 	    placeObject(&r, t, depths->ids[t]);
 	}
+        int i;
+        for(i=0; i<r.clips_waiting[t]; i++) {
+            output->endclip(output);
+        }
     }
     free(r.clips_waiting);
 }
@@ -619,7 +672,7 @@ void swf_doc_destroy(gfxdocument_t*gfx)
     free(gfx);gfx=0;
 }
 
-void swf_doc_set_parameter(gfxdocument_t*gfx, const char*name, const char*value)
+void swf_doc_setparameter(gfxdocument_t*gfx, const char*name, const char*value)
 {
     swf_doc_internal_t*i= (swf_doc_internal_t*)gfx->internal;
 }
@@ -647,7 +700,7 @@ gfxpage_t* swf_doc_getpage(gfxdocument_t*doc, int page)
     return swf_page;
 }
 
-void swf_set_parameter(gfxsource_t*src, const char*name, const char*value)
+void swf_setparameter(gfxsource_t*src, const char*name, const char*value)
 {
     msg("<verbose> setting parameter %s to \"%s\"", name, value);
 }
@@ -692,18 +745,26 @@ gfxdocument_t*swf_open(gfxsource_t*src, const char*filename)
     swf_doc->internal = i;
     swf_doc->get = 0;
     swf_doc->destroy = swf_doc_destroy;
-    swf_doc->set_parameter = swf_doc_set_parameter;
+    swf_doc->setparameter = swf_doc_setparameter;
     swf_doc->getpage = swf_doc_getpage;
 
     return swf_doc;
 }
 
+static void swf_destroy(gfxsource_t*src)
+{
+    memset(src, 0, sizeof(*src));
+    free(src);
+}
+
+
 gfxsource_t*gfxsource_swf_create()
 {
     gfxsource_t*src = (gfxsource_t*)malloc(sizeof(gfxsource_t));
     memset(src, 0, sizeof(gfxsource_t));
-    src->set_parameter = swf_set_parameter;
+    src->setparameter = swf_setparameter;
     src->open = swf_open;
+    src->destroy = swf_destroy;
     return src;
 }
 

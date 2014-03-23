@@ -24,8 +24,10 @@
 #ifndef __abc_registry_h__
 #define __abc_registry_h__
 
-#include "pool.h"
+#include "abc.h"
 
+DECLARE(asset_bundle);
+DECLARE_LIST(asset_bundle);
 DECLARE(slotinfo);
 DECLARE(classinfo);
 DECLARE(memberinfo);
@@ -38,6 +40,7 @@ DECLARE_LIST(slotinfo);
 /* member/class flags */
 #define FLAG_FINAL 1
 #define FLAG_BUILTIN 128
+#define FLAG_USED 64
 
 /* member flags */
 #define FLAG_STATIC 2
@@ -57,34 +60,30 @@ DECLARE_LIST(slotinfo);
 #define SUBTYPE_SET 2
 #define SUBTYPE_GETSET 3
 
-struct _slotinfo {
-    U8 kind,subtype,flags,access;
-    const char*package;
-    const char*name;
+#define SLOTINFO_HEAD \
+    U8 kind,subtype,flags,access; \
+    const char*package; \
+    const char*name; \
     int slot;
+
+struct _slotinfo {
+    SLOTINFO_HEAD;
 };
 struct _unresolvedinfo {
-    U8 kind,subtype,flags,access;
-    const char*package;
-    const char*name;
-    int slot;
+    SLOTINFO_HEAD;
     namespace_list_t*nsset;
 };
 struct _classinfo {
-    U8 kind,subtype,flags,access;
-    const char*package;
-    const char*name;
-    int slot;
+    SLOTINFO_HEAD;
     classinfo_t*superclass;
     dict_t members;
+    dict_t static_members;
     void*data; //TODO: get rid of this- parser.y should pass type/value/code triples around
+    asset_bundle_t*assets;
     classinfo_t*interfaces[];
 };
 struct _memberinfo {
-    U8 kind,subtype,flags,access;
-    const char*package;
-    const char*name;
-    int slot;
+    SLOTINFO_HEAD;
     union {
         classinfo_t*return_type;
         classinfo_t*type;
@@ -92,22 +91,22 @@ struct _memberinfo {
     classinfo_t*parent;
 };
 struct _methodinfo /*extends memberinfo*/ {
-    U8 kind,subtype,flags,access;
-    const char*package;
-    const char*name;
-    int slot;
+    SLOTINFO_HEAD;
     classinfo_t*return_type;
     classinfo_t*parent;
     classinfo_list_t*params;
 };
 struct _varinfo /*extends memberinfo*/ {
-    U8 kind,subtype,flags,access;
-    const char*package;
-    const char*name;
-    int slot;
+    SLOTINFO_HEAD;
     classinfo_t*type;
     classinfo_t*parent;
     constant_t*value;
+};
+
+struct _asset_bundle {
+    abc_file_t*file;
+    asset_bundle_list_t*dependencies;
+    char used;
 };
 
 extern type_t memberinfo_type;
@@ -117,9 +116,9 @@ char slotinfo_equals(slotinfo_t*c1, slotinfo_t*c2);
 void registry_init();
         
 classinfo_t* classinfo_register(int access, const char*package, const char*name, int num_interfaces);
-methodinfo_t* methodinfo_register_onclass(classinfo_t*cls, U8 access, const char*ns, const char*name);
+methodinfo_t* methodinfo_register_onclass(classinfo_t*cls, U8 access, const char*ns, const char*name, char is_static);
 methodinfo_t* methodinfo_register_global(U8 access, const char*package, const char*name);
-varinfo_t* varinfo_register_onclass(classinfo_t*cls, U8 access,  const char*ns, const char*name);
+varinfo_t* varinfo_register_onclass(classinfo_t*cls, U8 access,  const char*ns, const char*name, char is_static);
 varinfo_t* varinfo_register_global(U8 access, const char*package, const char*name);
 
 slotinfo_t* registry_resolve(slotinfo_t*s);
@@ -127,8 +126,8 @@ void registry_resolve_all();
 
 slotinfo_t* registry_find(const char*package, const char*name);
 void registry_dump();
-memberinfo_t* registry_findmember(classinfo_t*cls, const char*ns, const char*name, char superclasses);
-memberinfo_t* registry_findmember_nsset(classinfo_t*cls, namespace_list_t*ns, const char*name, char superclasses);
+memberinfo_t* registry_findmember(classinfo_t*cls, const char*ns, const char*name, char superclasses, char is_static);
+memberinfo_t* registry_findmember_nsset(classinfo_t*cls, namespace_list_t*ns, const char*name, char superclasses, char is_static);
 
 void registry_fill_multiname(multiname_t*m, namespace_t*n, slotinfo_t*c);
 #define MULTINAME(m,x) \
@@ -147,9 +146,14 @@ classinfo_t* slotinfo_gettype(slotinfo_t*);
 
 namespace_t access2namespace(U8 access, char*package);
 
-char registry_ispackage(char*package);
+char registry_ispackage(const char*package);
+
+void registry_add_asset(asset_bundle_t*bundle);
+void registry_use(slotinfo_t*s);
+asset_bundle_list_t*registry_getassets();
 
 // static multinames
+classinfo_t voidclass;
 classinfo_t* registry_getanytype();
 classinfo_t* registry_getarrayclass();
 classinfo_t* registry_getobjectclass();

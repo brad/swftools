@@ -116,7 +116,7 @@ static FT_Outline_Funcs outline_functions =
 
 static FT_Library ftlibrary = 0;
 
-SWFFONT* swf_LoadTrueTypeFont(const char*filename)
+SWFFONT* swf_LoadTrueTypeFont(const char*filename, char flashtype)
 {
     FT_Face face;
     FT_Error error;
@@ -141,17 +141,19 @@ SWFFONT* swf_LoadTrueTypeFont(const char*filename)
 	fprintf(stderr, "Couldn't load file %s- not a TTF file?\n", filename);
 	return 0;
     }
-    
-    FT_Set_Pixel_Sizes (face, 16*loadfont_scale, 16*loadfont_scale);
+   
+    int scale = flashtype?20:1;
+    FT_Set_Pixel_Sizes (face, 16*loadfont_scale*scale, 16*loadfont_scale*scale);
 
     if(face->num_glyphs <= 0) {
-	fprintf(stderr, "File %s contains %d glyphs\n", face->num_glyphs);
+	fprintf(stderr, "File %s contains %d glyphs\n", filename, (int)face->num_glyphs);
 	return 0;
     }
 
     font = (SWFFONT*)rfx_calloc(sizeof(SWFFONT));
     font->id = -1;
-    font->version = 2;
+    font->version = flashtype?3:2;
+
     font->layout = (SWFLAYOUT*)rfx_calloc(sizeof(SWFLAYOUT));
     font->layout->bounds = (SRECT*)rfx_calloc(face->num_glyphs*sizeof(SRECT));
     font->style =  ((face->style_flags&FT_STYLE_FLAG_ITALIC)?FONT_STYLE_ITALIC:0)
@@ -347,13 +349,18 @@ SWFFONT* swf_LoadTrueTypeFont(const char*filename)
     //font->layout->descent = abs(face->descender)*FT_SCALE*loadfont_scale*20/FT_SUBPIXELS/2; //face->bbox.xMax;
     //font->layout->leading = font->layout->ascent + font->layout->descent;
 
-    font->layout->ascent = -fontbbox.ymin;
-    if(font->layout->ascent < 0)
+    if(-fontbbox.ymin < 0)
         font->layout->ascent = 0;
-    font->layout->descent = fontbbox.ymax;
-    if(font->layout->descent < 0)
+    else
+	font->layout->ascent = -fontbbox.ymin;
+
+    if(fontbbox.ymax < 0)
         font->layout->descent = 0;
-    font->layout->leading = fontbbox.ymax - fontbbox.ymin;
+    else
+	font->layout->descent = fontbbox.ymax;
+
+    int leading = fontbbox.ymax - fontbbox.ymin;
+    font->layout->leading = leading>0x7fff?0x7fff:leading;
 
     /* notice: if skip_unused is true, font->glyph2ascii, font->glyphnames and font->layout->bounds will 
 	       have more memory allocated than just font->numchars, but only the first font->numchars 
@@ -373,7 +380,7 @@ SWFFONT* swf_LoadTrueTypeFont(const char*filename)
 }
 #else  //HAVE_FREETYPE
 
-SWFFONT* swf_LoadTrueTypeFont(const char*filename)
+SWFFONT* swf_LoadTrueTypeFont(const char*filename, char flashtype)
 {
     fprintf(stderr, "Warning: no freetype library- not able to load %s\n", filename);
     return 0;
@@ -571,7 +578,7 @@ static int isSWF(const char*filename)
     return 0;
 }
 
-SWFFONT* swf_LoadFont(const char*filename)
+SWFFONT* swf_LoadFont(const char*filename, char flashtype)
 {
     int is_swf;
     if(filename == 0)
@@ -580,11 +587,14 @@ SWFFONT* swf_LoadFont(const char*filename)
     if(is_swf<0)
 	return 0;
     if(is_swf) {
-	return swf_ReadFont(filename);
+	SWFFONT*font = swf_ReadFont(filename);
+	if(flashtype && font->version==2)
+	    fprintf(stderr, "Warning: Can't load font v2 file as flashtype (%s)\n", filename);
+	return font;
     }
 
 #if defined(HAVE_FREETYPE)
-    return swf_LoadTrueTypeFont(filename);
+    return swf_LoadTrueTypeFont(filename, flashtype);
 #elif defined(HAVE_T1LIB)
     return swf_LoadT1Font(filename);
 #else

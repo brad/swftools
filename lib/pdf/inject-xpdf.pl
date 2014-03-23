@@ -13,9 +13,15 @@ mkdir("$directory/tmp/");
 
 chdir("$directory/tmp/") or die;
 
+sub cleanup_and_die
+{
+    system("rm -f xpdf");
+    system("rm -f $directory");
+}
+
 print "Extracting $filename\n";
 system("tar -zxf ../../$filename") and die;
-system("find . -type f -exec mv {} .. \\;") and die;
+system("find . -type f -exec mv {} .. \\;") and cleanup_and_die;
 chdir("..");
 system("find . -type d -exec rmdir {} \\; 2> /dev/null");
 
@@ -24,7 +30,7 @@ for($a=1;$a<10;$a++) {
     $patchname = "../${basename}pl$a.patch";
     if(-f $patchname) {
         print "*pl$a.patch\n";
-        system("patch -s < $patchname") and die;
+        system("patch -s < $patchname") and cleanup_and_die;
     }
 }
 
@@ -36,6 +42,8 @@ system("patch < ../xpdf-changes.patch 2>&1 | grep -i failed");
 chdir("..");
 system("rm -f xpdf");
 system("ln -s $directory xpdf");
+
+system("touch xpdf/*");
 
 open(fi, ">switch");
 

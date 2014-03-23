@@ -113,6 +113,36 @@ int mem_get(mem_t*m, void*data, int length)
     return length;
 }
 
+// ------------------------------- median -------------------------------------
+
+float medianf(float*a, int n)
+{
+    int i,j,l,m;
+    float x;
+    int k=n&1?n/2:n/2-1;
+    l=0; 
+    m=n-1;
+    while(l<m) {
+        x=a[k];
+        i=l;j=m;
+        do {
+            while(a[i]<x) i++;
+            while(x<a[j]) j--;
+            if(i<=j) {
+		//swap
+		float t = a[i];
+		a[i] = a[j];
+		a[j] = t;
+                i++;
+		j--;
+            }
+        } while(i<=j);
+        if(j<k) l=i;
+        if(k<i) m=j;
+    }
+    return a[k];
+}
+
 // ------------------------------- ringbuffer_t -------------------------------
 
 typedef struct _ringbuffer_internal_t
@@ -344,7 +374,7 @@ static char _trie_put(trielayer_t**t, unsigned const char*id, void*data)
 {
     if(!*t) {
         (*t) = rfx_calloc(sizeof(trielayer_t));
-        (*t)->rest = (unsigned char*)strdup(id);
+        (*t)->rest = (unsigned char*)strdup((char*)id);
         (*t)->data = data;
         return 0;
     } 
@@ -359,7 +389,7 @@ static char _trie_put(trielayer_t**t, unsigned const char*id, void*data)
         char overwrite = 0;
         if((*t)->rest) 
             overwrite = 1;
-        (*t)->rest = strdup("");
+        (*t)->rest = (unsigned char*)strdup("");
         (*t)->data = data;
         return overwrite;
     }
@@ -367,7 +397,7 @@ static char _trie_put(trielayer_t**t, unsigned const char*id, void*data)
 static char _trie_remove(trielayer_t*t, unsigned const char*id)
 {
     while(t) {
-        if(t->rest && !strcmp(t->rest, id)) {
+        if(t->rest && !strcmp((char*)t->rest, (char*)id)) {
             free(t->rest);
             t->rest = 0;
             return 1;
@@ -413,7 +443,7 @@ int trie_contains(trie_t*trie, unsigned const char*id)
 {
     trielayer_t*t = trie->start;
     while(t) {
-        if(t->rest && !strcmp(t->rest, id))
+        if(t->rest && !strcmp((char*)t->rest, (char*)id))
             return 1;
         if(!*id) 
             return 0;
@@ -425,7 +455,7 @@ void* trie_lookup(trie_t*trie, unsigned const char*id)
 {
     trielayer_t*t = trie->start;
     while(t) {
-        if(t->rest && !strcmp(t->rest, id))
+        if(t->rest && !strcmp((char*)t->rest, (char*)id))
             return t->data;
         if(!*id) 
             return 0;
@@ -478,7 +508,7 @@ void _trie_dump(trielayer_t*t, char*buffer, int pos)
     }
     if(t->rest) {
         buffer[pos]=0;
-        printf("%s%s %08x\n", buffer, t->rest, t->data);
+        printf("%s%s %08x\n", buffer, t->rest, (int)t->data);
     }
 }
 
@@ -529,7 +559,7 @@ static char crc32_initialized=0;
 static void crc32_init(void)
 {
     int t;
-    if(crc32_initialized) 
+    if(crc32_initialized)
         return;
     crc32_initialized = 1;
     for(t=0; t<256; t++) {
@@ -539,6 +569,23 @@ static void crc32_init(void)
           c = (0xedb88320L*(c&1)) ^ (c >> 1);
         }
         crc32[t] = c;
+    }
+}
+static uint64_t crc64[256];
+static char crc64_initialized=0;
+static void crc64_init(void)
+{
+    int t;
+    if(crc64_initialized)
+        return;
+    crc64_initialized = 1;
+    for(t=0; t<256; t++) {
+        unsigned int c = t;
+        int s;
+        for (s = 0; s < 8; s++) {
+          c = ((c&1)?0xC96C5795D7870F42ll:0) ^ (c >> 1);
+        }
+        crc64[t] = c;
     }
 }
 // ------------------------------- string_t -----------------------------------
@@ -658,6 +705,18 @@ unsigned int crc32_add_string(unsigned int checksum, const char*s)
     }
     return checksum;
 }
+unsigned int crc32_add_bytes(unsigned int checksum, const void*_s, int len)
+{
+    unsigned char*s = (unsigned char*)_s;
+    crc32_init();
+    if(!s || !len)
+        return checksum;
+    do {
+        checksum = checksum>>8 ^ crc32[(*s^checksum)&0xff];
+        s++;
+    } while(--len);
+    return checksum;
+}
 
 unsigned int string_hash(const string_t*str)
 {
@@ -676,6 +735,17 @@ unsigned int string_hash2(const char*str)
     crc32_init();
     while(*p) {
         checksum = checksum>>8 ^ crc32[(*p^checksum)&0xff];
+        p++;
+    }
+    return checksum;
+}
+uint64_t string_hash64(const char*str)
+{
+    uint64_t checksum = 0;
+    const char*p = str;
+    crc64_init();
+    while(*p) {
+        checksum = checksum>>8 ^ crc64[(*p^checksum)&0xff];
         p++;
     }
     return checksum;
@@ -709,6 +779,30 @@ int string_equals2(string_t*str, string_t*str2)
     if(str->len == str2->len && !memcmp(str->str, str2->str, str->len))
 	return 1;
     return 0;
+}
+
+char* concat2(const char* t1, const char* t2)
+{
+    int l1 = strlen(t1);
+    int l2 = strlen(t2);
+    char*text = malloc(l1+l2+1);
+    memcpy(text   , t1, l1);
+    memcpy(text+l1, t2, l2);
+    text[l1+l2] = 0;
+    return text;
+}
+
+char* concat3(const char* t1, const char* t2, const char* t3)
+{
+    int l1 = strlen(t1);
+    int l2 = strlen(t2);
+    int l3 = strlen(t3);
+    char*text = malloc(l1+l2+l3+1);
+    memcpy(text   , t1, l1);
+    memcpy(text+l1, t2, l2);
+    memcpy(text+l1+l2, t3, l3);
+    text[l1+l2+l3] = 0;
+    return text;
 }
 
 // ------------------------------- stringarray_t ------------------------------
@@ -857,6 +951,23 @@ void ptr_free(void*o)
     return;
 }
 
+char int_equals(const void*o1, const void*o2) 
+{
+    return o1==o2;
+}
+unsigned int int_hash(const void*o) 
+{
+    return string_hash3((const char*)&o, sizeof(o));
+}
+void* int_dup(const void*o) 
+{
+    return (void*)o;
+}
+void int_free(void*o) 
+{
+    return;
+}
+
 char charptr_equals(const void*o1, const void*o2) 
 {
     if(!o1 || !o2)
@@ -921,6 +1032,13 @@ void stringstruct_free(void*o)
     if(o)
         string_free(o);
 }
+
+type_t int_type = {
+    equals: int_equals,
+    hash: int_hash,
+    dup: int_dup,
+    free: int_free,
+};
 
 type_t ptr_type = {
     equals: ptr_equals,
@@ -1053,9 +1171,9 @@ void dict_dump(dict_t*h, FILE*fi, const char*prefix)
         dictentry_t*e = h->slots[t];
         while(e) {
             if(h->key_type!=&charptr_type) {
-                fprintf(fi, "%s%08x=%08x\n", prefix, e->key, e->data);
+                fprintf(fi, "%s%08x=%08x\n", prefix, (int)e->key, (int)e->data);
             } else {
-                fprintf(fi, "%s%s=%08x\n", prefix, e->key, e->data);
+                fprintf(fi, "%s%s=%08x\n", prefix, (char*)e->key, (int)e->data);
             }
             e = e->next;
         }
@@ -1140,6 +1258,34 @@ char dict_del(dict_t*h, const void*key)
     dictentry_t*e = head, *prev=0;
     while(e) {
         if(h->key_type->equals(e->key, key)) {
+            dictentry_t*next = e->next;
+            h->key_type->free(e->key);
+            memset(e, 0, sizeof(dictentry_t));
+            rfx_free(e);
+            if(e == head) {
+                h->slots[hash] = next;
+            } else {
+                assert(prev);
+                prev->next = next;
+            }
+            h->num--;
+            return 1;
+        }
+        prev = e;
+        e = e->next;
+    }
+    return 0;
+}
+
+char dict_del2(dict_t*h, const void*key, void*data)
+{
+    if(!h->num)
+        return 0;
+    unsigned int hash = h->key_type->hash(key) % h->hashsize;
+    dictentry_t*head = h->slots[hash];
+    dictentry_t*e = head, *prev=0;
+    while(e) {
+        if(h->key_type->equals(e->key, key) && e->data == data) {
             dictentry_t*next = e->next;
             h->key_type->free(e->key);
             memset(e, 0, sizeof(dictentry_t));
@@ -1244,6 +1390,51 @@ void dict_destroy(dict_t*dict)
     rfx_free(dict);
 }
 
+// ------------------------------- mtf_t --------------------------------------
+mtf_t* mtf_new(type_t*type)
+{
+    NEW(mtf_t, mtf);
+    mtf->type = type;
+    return mtf;
+}
+void mtf_increase(mtf_t*m, const void*key)
+{
+    mtf_item_t*item = m->first;
+    mtf_item_t*last = 0;
+    while(item) {
+	if(m->type->equals(item->key, key)) {
+	    item->num++;
+	    if(item->num>m->first->num) {
+		if(last) last->next = item->next;
+		else m->first = item->next;
+		item->next = m->first;
+		m->first = item;
+	    }
+            return;
+	}
+	last = item;
+	item = item->next;
+    }
+    NEW(mtf_item_t,n);
+    if(last) last->next = n;
+    else m->first = n;
+    n->key = key;
+    n->num = 1;
+}
+void mtf_destroy(mtf_t*m)
+{
+    if(!m) return;
+    mtf_item_t*item = m->first;
+    m->first = 0;
+    while(item) {
+	mtf_item_t*next = item->next;
+	item->next = 0;
+	free(item);
+	item = next;
+    }
+    free(m);
+}
+
 // ------------------------------- map_t --------------------------------------
 
 typedef struct _map_internal_t
@@ -1279,7 +1470,7 @@ static void freestring(void*data)
 static void dumpmapentry(void*data, const void*key, void*value)
 {
     FILE*fi = (FILE*)data;
-    fprintf(fi, "%s=%s\n", key, (char*)value);
+    fprintf(fi, "%s=%s\n", (char*)key, (char*)value);
 }
 void map_dump(map_t*map, FILE*fi, const char*prefix)
 {
@@ -1301,7 +1492,7 @@ void map_destroy(map_t*map)
 
 // ------------------------------- array_t --------------------------------------
 
-array_t* array_new() {
+array_t* array_new1() {
     array_t*d = malloc(sizeof(array_t));
     memset(d, 0, sizeof(array_t));
     d->entry2pos = dict_new();
@@ -1314,15 +1505,15 @@ array_t* array_new2(type_t*type) {
     return d;
 }
 void*array_getkey(array_t*array, int nr) {
-    if(nr > array->num || nr<0) {
-	printf("error: reference to element %d in array[%d]\n", nr, array->num);
+    if(nr >= array->num || nr<0) {
+	fprintf(stderr, "error: reference to element %d in array[%d]\n", nr, array->num);
 	return 0;
     }
     return array->d[nr].name;
 }
 void*array_getvalue(array_t*array, int nr) {
-    if(nr > array->num || nr<0) {
-	printf("error: reference to element %d in array[%d]\n", nr, array->num);
+    if(nr >= array->num || nr<0) {
+	fprintf(stderr, "error: reference to element %d in array[%d]\n", nr, array->num);
 	return 0;
     }
     return array->d[nr].data;

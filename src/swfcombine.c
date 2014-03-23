@@ -42,11 +42,14 @@ struct config_t
    char isframe;
    char local_with_networking;
    char local_with_filesystem;
+   char accelerated_blit;
+   char hardware_gpu;
    int loglevel;
    int sizex;
    char hassizex;
    int sizey;
    char hassizey;
+   int flashversion;
    int framerate;
    int movex;
    int movey;
@@ -125,6 +128,11 @@ int args_callback_option(char*name,char*val) {
 	config.isframe = 1;
 	return 0;
     }
+    else if (!strcmp(name, "F"))
+    {
+	config.flashversion = atoi(val);
+	return 1;
+    }
     else if (!strcmp(name, "d"))
     {
 	config.dummy = 1;
@@ -183,6 +191,16 @@ int args_callback_option(char*name,char*val) {
 	config.local_with_filesystem = 1;
 	return 0;
     }
+    else if (!strcmp(name, "B"))
+    {
+	config.accelerated_blit = 1;
+	return 0;
+    }
+    else if (!strcmp(name, "G"))
+    {
+	config.hardware_gpu = 1;
+	return 0;
+    }
     else if (!strcmp(name, "t") || !strcmp(name, "T"))
     {
 	if(master_filename) {
@@ -216,6 +234,7 @@ static struct options_t options[] = {
 {"l", "overlay"},
 {"c", "clip"},
 {"v", "verbose"},
+{"F", "flashversion"},
 {"d", "dummy"},
 {"f", "frame"},
 {"x", "movex"},
@@ -225,6 +244,8 @@ static struct options_t options[] = {
 {"X", "width"},
 {"Y", "height"},
 {"N", "local-with-networking"},
+{"G", "hardware-gpu"},
+{"B", "accelerated-blit"},
 {"L", "local-with-filesystem"},
 {"z", "zlib"},
 {0,0}
@@ -295,15 +316,18 @@ void args_callback_usage(char *name)
     printf("-l , --overlay                 Don't remove any master objects, only overlay new objects\n");
     printf("-c , --clip                    Clip the slave objects by the corresponding master objects\n");
     printf("-v , --verbose                 Be verbose. Use more than one -v for greater effect \n");
+    printf("-F , --flashversion            Set the flash version of the output file.\n");
     printf("-d , --dummy                   Don't require slave objects (for changing movie attributes)\n");
     printf("-f , --frame                   The following identifier is a frame or framelabel, not an id or objectname\n");
     printf("-x , --movex <xpos>            x Adjust position of slave by <xpos> pixels\n");
     printf("-y , --movey <ypos>            y Adjust position of slave by <ypos> pixels\n");
-    printf("-s , --scale <scale>           Adjust size of slave by <scale> percent (e.g. 100% = original size)\n");
+    printf("-s , --scale <scale>           Adjust size of slave by <scale> percent (e.g. 100%% = original size)\n");
     printf("-r , --rate <fps>              Set movie framerate to <fps> (frames/sec)\n");
     printf("-X , --width <width>           Force movie bbox width to <width> (default: use master width (not with -t))\n");
     printf("-Y , --height <height>          Force movie bbox height to <height> (default: use master height (not with -t))\n");
     printf("-N , --local-with-networking     Make output file \"local-with-networking\"\n");
+    printf("-G , --hardware-gpu            Set the \"use hardware gpu\" bit in the output file\n");
+    printf("-B , --accelerated-blit        Set the \"use accelerated blit\" bit in the output file\n");
     printf("-L , --local-with-filesystem     Make output file \"local-with-filesystem\"\n");
     printf("-z , --zlib <zlib>             Enable Flash 6 (MX) Zlib Compression\n");
     printf("\n");
@@ -875,6 +899,8 @@ void adjustheader(SWF*swf)
 	swf->movieSize.ymax = 
 	swf->movieSize.ymin + config.sizey;
     }
+    if(config.flashversion)
+	swf->fileVersion = config.flashversion;
 }
 
 void catcombine(SWF*master, char*slave_name, SWF*slave, SWF*newswf)
@@ -887,6 +913,8 @@ void catcombine(SWF*master, char*slave_name, SWF*slave, SWF*newswf)
 	msg("<fatal> Can't combine --cat and --frame");
 	exit(1);
     }
+    if(config.flashversion)
+	master->fileVersion = config.flashversion;
    
     tag = master->firstTag;
     while(tag)
@@ -997,6 +1025,29 @@ void normalcombine(SWF*master, char*slave_name, SWF*slave, SWF*newswf)
 		  msg("<notice> Slave file attached to object %d.", defineid);
 		}
 	    }
+	} else if(tag->id == ST_EXPORTASSETS) {
+	    int t;
+	    int num = swf_GetU16(tag);
+	    for(t=0;t<num;t++)
+	    {
+		U16 id = swf_GetU16(tag);
+		char*name = swf_GetString(tag);
+		if(spriteid<0 && slavename && !strcmp(name,slavename)) {
+		    spriteid = id;
+		    msg("<notice> Slave file attached to object %d exported as %s.", id, name);
+		}
+	    }
+	} else if(tag->id == ST_SYMBOLCLASS) {
+	    /* a symbolclass tag is like a define tag: it defines id 0000 */
+	    int num = swf_GetU16(tag);
+	    int t;
+	    for(t=0;t<num;t++) {
+		U16 id = swf_GetU16(tag);
+		if(!id) {
+		    masterbitmap[id] = 1;
+		}
+		swf_GetString(tag);
+	    }
 	} else if(tag->id == ST_PLACEOBJECT2) {
 	    char * name = swf_GetName(tag);
 	    int id = swf_GetPlaceID(tag);
@@ -1051,6 +1102,7 @@ void normalcombine(SWF*master, char*slave_name, SWF*slave, SWF*newswf)
     }
 
     swf_Relocate (slave, masterbitmap);
+    
     if(config.merge)
 	swf_RelocateDepth (slave, depthbitmap);
     jpeg_assert(slave, master);
@@ -1280,7 +1332,7 @@ int main(int argn, char *argv[])
 	    {
 		int ret;
 		fi = open(slave_filename[t], O_RDONLY|O_BINARY);
-		if(!fi) {
+		if(fi<0) {
 		    msg("<fatal> Failed to open %s\n", slave_filename[t]);
 		    exit(1);
 		}
@@ -1321,6 +1373,10 @@ int main(int argn, char *argv[])
         newswf.fileAttributes &= ~FILEATTRIBUTE_USENETWORK;
     if(config.local_with_networking)
         newswf.fileAttributes |= FILEATTRIBUTE_USENETWORK;
+    if(config.accelerated_blit)
+        newswf.fileAttributes |= FILEATTRIBUTE_USEACCELERATEDBLIT;
+    if(config.hardware_gpu)
+        newswf.fileAttributes |= FILEATTRIBUTE_USEHARDWAREGPU;
 
     fi = open(outputname, O_BINARY|O_RDWR|O_TRUNC|O_CREAT, 0777);
 
@@ -1334,6 +1390,7 @@ int main(int argn, char *argv[])
 	swf_WriteSWF(fi, &newswf);
     }
     close(fi);
-    return 0;
+
+    return 0; //ok
 }
 

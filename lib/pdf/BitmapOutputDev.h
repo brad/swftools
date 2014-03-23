@@ -24,11 +24,12 @@
 #include "../gfxsource.h"
 #include "../gfxtools.h"
 
-#include "config.h"
-#include "GFXOutputDev.h"
+#include "../../config.h"
+#include "CharOutputDev.h"
 #include "InfoOutputDev.h"
 #include "PDFDoc.h"
 #include "CommonOutputDev.h"
+#include "popplercompat.h"
 
 struct ClipState
 {
@@ -44,15 +45,14 @@ struct ClipState
 
 class BitmapOutputDev: public CommonOutputDev {
 public:
-    BitmapOutputDev(InfoOutputDev*info, PDFDoc*doc);
+    BitmapOutputDev(InfoOutputDev*info, PDFDoc*doc, int*page2page, int num_pages, int x, int y, int x1, int y1, int x2, int y2);
     virtual ~BitmapOutputDev();
+
+    virtual void dbg_newdata(char*newdata);
    
     // CommonOutputDev:
     virtual void setDevice(gfxdevice_t*dev);
-    virtual void setMove(int x,int y);
-    virtual void setClip(int x1,int y1,int x2,int y2);
     virtual void setParameter(const char*key, const char*value);
-    virtual void setPageMap(int*page2page, int pagemap_size);
 
     // OutputDev:
     virtual GBool upsideDown();
@@ -63,14 +63,14 @@ public:
     virtual GBool interpretType3Chars();
     virtual GBool needNonText();
     virtual void setDefaultCTM(double *ctm);
-/*    virtual GBool checkPageSlice(Page *page, double hDPI, double vDPI,
+    virtual GBool checkPageSlice(Page *page, double hDPI, double vDPI,
 			       int rotate, GBool useMediaBox, GBool crop,
 			       int sliceX, int sliceY, int sliceW, int sliceH,
 			       GBool printing, Catalog *catalog,
 			       GBool (*abortCheckCbk)(void *data) = NULL,
-			       void *abortCheckCbkData = NULL);*/
+			       void *abortCheckCbkData = NULL);
 
-    virtual void startPage(int pageNum, GfxState *state, double x1,double y1,double x2,double y2);
+    virtual void beginPage(GfxState *state, int pageNum);
     virtual void endPage();
     virtual void finishPage();
 
@@ -109,24 +109,17 @@ public:
     virtual void stroke(GfxState *state);
     virtual void fill(GfxState *state);
     virtual void eoFill(GfxState *state);
-#if (xpdfMajorVersion < 3) || (xpdfMinorVersion < 2) || (xpdfUpdateVersion < 7)
-    virtual void tilingPatternFill(GfxState *state, Object *str,
+    virtual POPPLER_TILING_PATERN_RETURN tilingPatternFill(
+             GfxState *state, POPPLER_TILING_PATERN_GFX Object *str,
 			       int paintType, Dict *resDict,
 			       double *mat, double *bbox,
 			       int x0, int y0, int x1, int y1,
 			       double xStep, double yStep);
-#else
-    virtual void tilingPatternFill(GfxState *state, Gfx *gfx, Object *str,
-			       int paintType, Dict *resDict,
-			       double *mat, double *bbox,
-			       int x0, int y0, int x1, int y1,
-			       double xStep, double yStep);
-#endif
 
     virtual GBool functionShadedFill(GfxState *state,
 				     GfxFunctionShading *shading);
-    virtual GBool axialShadedFill(GfxState *state, GfxAxialShading *shading);
-    virtual GBool radialShadedFill(GfxState *state, GfxRadialShading *shading);
+    virtual GBool axialShadedFill(GfxState *state, GfxAxialShading *shading POPPLER_RAXIAL_MIN_MAX);
+    virtual GBool radialShadedFill(GfxState *state, GfxRadialShading *shading POPPLER_RAXIAL_MIN_MAX);
 
     virtual void clip(GfxState *state);
     virtual void eoClip(GfxState *state);
@@ -149,21 +142,27 @@ public:
 
     virtual void drawImageMask(GfxState *state, Object *ref, Stream *str,
 			       int width, int height, GBool invert,
+			       POPPLER_INTERPOLATE
 			       GBool inlineImg);
     virtual void drawImage(GfxState *state, Object *ref, Stream *str,
 			   int width, int height, GfxImageColorMap *colorMap,
+			   POPPLER_INTERPOLATE
 			   int *maskColors, GBool inlineImg);
     virtual void drawMaskedImage(GfxState *state, Object *ref, Stream *str,
 				 int width, int height,
 				 GfxImageColorMap *colorMap,
+				 POPPLER_INTERPOLATE
 				 Stream *maskStr, int maskWidth, int maskHeight,
-				 GBool maskInvert);
+				 GBool maskInvert
+				 POPPLER_MASK_INTERPOLATE);
     virtual void drawSoftMaskedImage(GfxState *state, Object *ref, Stream *str,
 				     int width, int height,
 				     GfxImageColorMap *colorMap,
+				     POPPLER_INTERPOLATE
 				     Stream *maskStr,
 				     int maskWidth, int maskHeight,
-				     GfxImageColorMap *maskColorMap);
+				     GfxImageColorMap *maskColorMap
+				     POPPLER_MASK_INTERPOLATE);
 
     virtual void type3D0(GfxState *state, double wx, double wy);
     virtual void type3D1(GfxState *state, double wx, double wy, double llx, double lly, double urx, double ury);
@@ -186,28 +185,33 @@ public:
 
     
 private:
-    void clearClips();
-    void clearBoolPolyDev(int x1, int y1, int x2, int y2);
-    void clearBoolTextDev(int x1, int y1, int x2, int y2);
+    void flushEverything();
+    void clearClips(int x1, int y1, int x2, int y2);
+    void clearBoolPolyDev();
+    void clearBoolTextDev();
     void flushText();
     void flushBitmap();
     GBool checkNewText(int x1, int y1, int x2, int y2);
     GBool checkNewBitmap(int x1, int y1, int x2, int y2);
     GBool clip0and1differ(int x1,int y1,int x2,int y2);
-    GBool intersection(int x1,int y1,int x2,int y2);
+    GBool intersection(SplashBitmap*boolpoly, SplashBitmap*booltext, int x1, int y1, int x2, int y2);
     
     virtual gfxbbox_t getImageBBox(GfxState*state);
     virtual gfxbbox_t getBBox(GfxState*state);
 
     char config_extrafontdata;
+    char config_optimizeplaincolorfills;
+    char config_skewedtobitmap;
+    char config_alphatobitmap;
+    char config_transparent;
+
+    int text_x1,text_y1,text_x2,text_y2;
 
     int layerstate;
     GBool emptypage;
 
     SplashPath*bboxpath;
 
-    PDFDoc*doc;
-    XRef*xref;
     SplashOutputDev*rgbdev;
     SplashOutputDev*clip0dev;
     SplashOutputDev*clip1dev;
@@ -218,19 +222,14 @@ private:
     SplashBitmap*clip0bitmap;
     SplashBitmap*clip1bitmap;
     SplashBitmap*boolpolybitmap;
+    SplashBitmap*stalepolybitmap;
     SplashBitmap*booltextbitmap;
+    SplashBitmap*staletextbitmap;
 
     gfxdevice_t* gfxoutput;
-    GFXOutputDev*gfxdev;
-    InfoOutputDev*info;
+    gfxdevice_t* gfxoutput_string;
+    CharOutputDev*gfxdev;
     gfxdevice_t*dev;
-
-    int movex, movey;
-    int width, height;
-
-    int user_movex, user_movey;
-    int user_clipx1, user_clipy1;
-    int user_clipx2, user_clipy2;
 
     //ClipState*clipstates;
 };

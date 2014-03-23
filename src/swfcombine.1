@@ -1,15 +1,15 @@
-.TH swfcombine "1" "April 2009" "swfcombine" "swftools"
+.TH swfcombine "1" "April 2012" "swfcombine" "swftools"
 .SH NAME
-swfcombine - a tool for combining swf (flash) files
+swfcombine \- a tool for combining swf (flash) files
 
 .SH Synopsis
-.B swfcombine [-rXYomlcv] [-f] masterfile [-xysf] [(name1|#id1)=]slavefile1 .. [-xysf] [(nameN|#idN)=]slavefileN
+.B swfcombine [\-rXYomlcv] [\-f] masterfile [\-xysf] [(name1|#id1)=]slavefile1 .. [\-xysf] [(nameN|#idN)=]slavefileN
 .PP
-.B swfcombine [-rXYomv] --stack[1] [-xysf] [(name1|#id1)=]slavefile1 .. [-xysf] [(nameN|#idN)=]slavefileN
+.B swfcombine [\-rXYomv] \--stack[1] [\-xysf] [(name1|#id1)=]slavefile1 .. [\-xysf] [(nameN|#idN)=]slavefileN
 .PP
-.B swfcombine [-rXYov] --cat [-xysf] [(name1|#id1)=]slavefile1 .. [-xysf] [(nameN|#idN)=]slavefileN
+.B swfcombine [\-rXYov] \--cat [\-xysf] [(name1|#id1)=]slavefile1 .. [\-xysf] [(nameN|#idN)=]slavefileN
 .PP
-.B swfcombine [-rXYomlcv] --dummy [-xys] [file]
+.B swfcombine [\-rXYomlcv] \--dummy [\-xys] [file]
 
 .SH DESCRIPTION
 Take two or more SWF files, and combine them into a new SWF. SWFs can either
@@ -49,6 +49,9 @@ movie. swfcombine can be used to perform the latter.
 \fB\-v\fR, \fB\-\-verbose\fR 
     Be verbose. Use more than one -v for greater effect 
 .TP
+\fB\-F\fR, \fB\-\-flashversion\fR 
+    Set the flash version of the output file.
+.TP
 \fB\-d\fR, \fB\-\-dummy\fR 
     Don't require the presence of slave objects. Usually used together with \fB\-X\fR, \fB\-Y\fR or \fB\-r\fR.
 .TP
@@ -76,6 +79,12 @@ movie. swfcombine can be used to perform the latter.
 .TP
 \fB\-N\fR, \fB\-\-local-with-networking\fR 
     Make output file "local-with-networking"
+.TP
+\fB\-G\fR, \fB\-\-hardware-gpu\fR 
+    Set the "use hardware gpu" bit in the output file
+.TP
+\fB\-B\fR, \fB\-\-accelerated-blit\fR 
+    Set the "use accelerated blit" bit in the output file
 .TP
 \fB\-L\fR, \fB\-\-local-with-filesystem\fR 
     Make output file "local-with-filesystem"
@@ -111,7 +120,7 @@ the decimal number of the file, starting by zero (00).
 Create two flash movies. Insert some rectangle into one of them, and give
 it a name. (E.g. "foo") Now call
 
-swfcombine -o combined.swf master.swf foo=slave.swf
+swfcombine \-o combined.swf master.swf foo=slave.swf
 
 As a result, the slave movie should be visible inside the master movie
 at the position where the rectangle used to be.

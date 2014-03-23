@@ -166,6 +166,8 @@ class ConfigScript:
                 return 1
         elif name.startswith("HAVE_LAME"):
             return None
+        elif name.startswith("HAVE_FFTW3"):
+            return None
         elif name.startswith("O_BINARY"):
             if sys.platform.startswith("win"):
                 return None
@@ -249,24 +251,29 @@ if "freetype" not in config.libraries:
     sys.exit(1)
 
 base_sources = [
-"lib/q.c", "lib/utf8.c", "lib/png.c", "lib/jpeg.c", "lib/wav.c", "lib/mp3.c", "lib/os.c", "lib/bitio.c", "lib/log.c", "lib/mem.c",
+"lib/q.c", "lib/utf8.c", "lib/png.c", "lib/jpeg.c", "lib/wav.c", "lib/mp3.c", "lib/os.c", "lib/bitio.c", "lib/log.c", "lib/mem.c", "lib/ttf.c", "lib/kdtree.c", "lib/xml.c"
 ]
 rfxswf_sources = [
 "lib/modules/swfaction.c", "lib/modules/swfbits.c", "lib/modules/swfbutton.c",
-"lib/modules/swfcgi.c", "lib/modules/swfdraw.c", "lib/modules/swfdump.c", "lib/modules/swffilter.c",
+"lib/modules/swfcgi.c", "lib/modules/swfalignzones.c", "lib/modules/swfdraw.c", "lib/modules/swfdump.c", "lib/modules/swffilter.c",
 "lib/modules/swffont.c", "lib/modules/swfobject.c", "lib/modules/swfrender.c", "lib/modules/swfshape.c",
 "lib/modules/swfsound.c", "lib/modules/swftext.c", "lib/modules/swftools.c",
-"lib/rfxswf.c", "lib/drawer.c", "lib/MD5.c", "lib/h.263/dct.c", "lib/h.263/h263tables.c",
+"lib/rfxswf.c", "lib/drawer.c", "lib/h.263/dct.c", "lib/h.263/h263tables.c",
 "lib/h.263/swfvideo.c", "lib/action/assembler.c", "lib/action/compile.c",
 "lib/action/lex.swf4.c", "lib/action/lex.swf5.c", "lib/action/libming.c",
 "lib/action/swf4compiler.tab.c", "lib/action/swf5compiler.tab.c", "lib/action/actioncompiler.c",
-"lib/as3/abc.c", "lib/as3/code.c", "lib/as3/pool.c", "lib/as3/files.c", "lib/as3/opcodes.c", 
+"lib/as3/assets.c", "lib/as3/abc.c", "lib/as3/state.c", "lib/as3/code.c", "lib/as3/pool.c", "lib/as3/files.c", "lib/as3/opcodes.c", 
 "lib/as3/scripts.c", "lib/as3/common.c", "lib/as3/builtin.c", "lib/as3/compiler.c", "lib/as3/expr.c", "lib/as3/import.c",
-"lib/as3/initcode.c", "lib/as3/parser.tab.c", "lib/as3/registry.c", "lib/as3/tokenizer.yy.c",
+"lib/as3/initcode.c", "lib/as3/parser.tab.c", "lib/as3/parser_help.c", "lib/as3/registry.c", "lib/as3/tokenizer.yy.c",
 ]
 libpdf_sources = [
-"lib/pdf/GFXOutputDev.cc", "lib/pdf/InfoOutputDev.cc", "lib/pdf/BitmapOutputDev.cc",
-"lib/pdf/FullBitmapOutputDev.cc", "lib/pdf/pdf.cc", "lib/pdf/fonts.c", "lib/pdf/xpdf/GHash.cc",
+"lib/pdf/VectorGraphicOutputDev.cc",
+"lib/pdf/CharOutputDev.cc",
+"lib/pdf/InfoOutputDev.cc", "lib/pdf/BitmapOutputDev.cc",
+"lib/pdf/FullBitmapOutputDev.cc",
+"lib/pdf/CommonOutputDev.cc",
+"lib/pdf/bbox.c",
+"lib/pdf/pdf.cc", "lib/pdf/fonts.c", "lib/pdf/xpdf/GHash.cc",
 "lib/pdf/xpdf/GList.cc", "lib/pdf/xpdf/GString.cc", "lib/pdf/xpdf/gmem.cc", "lib/pdf/xpdf/gfile.cc",
 "lib/pdf/xpdf/FoFiTrueType.cc", "lib/pdf/xpdf/FoFiType1.cc", "lib/pdf/xpdf/FoFiType1C.cc",
 "lib/pdf/xpdf/FoFiBase.cc", "lib/pdf/xpdf/FoFiEncodings.cc", "lib/pdf/xpdf/OutputDev.cc", "lib/pdf/xpdf/PDFDoc.cc",
@@ -285,7 +292,10 @@ libpdf_sources = [
 "lib/pdf/xpdf/SplashFTFontFile.cc", "lib/pdf/xpdf/SplashFTFont.cc"]
 
 libgfx_sources = [
-"lib/gfxtools.c", "lib/gfxfont.c", "lib/gfxpoly.c",
+"lib/gfxtools.c", "lib/gfxfont.c", "lib/gfximage.c",
+"lib/gfxpoly/active.c", "lib/gfxpoly/convert.c", "lib/gfxpoly/moments.c",
+"lib/gfxpoly/poly.c", "lib/gfxpoly/renderpoly.c", "lib/gfxpoly/stroke.c",
+"lib/gfxpoly/wind.c", "lib/gfxpoly/xrow.c",
 "lib/devices/dummy.c", "lib/devices/file.c", "lib/devices/render.c", "lib/devices/text.c", "lib/devices/record.c",
 "lib/devices/ops.c", "lib/devices/polyops.c", "lib/devices/bbox.c", "lib/devices/rescale.c",
 "lib/art/art_affine.c", "lib/art/art_alphagamma.c", "lib/art/art_bpath.c", "lib/art/art_gray_svp.c",
@@ -298,11 +308,7 @@ libgfx_sources = [
 "lib/art/art_svp_render_aa.c", "lib/art/art_svp_vpath.c", "lib/art/art_svp_vpath_stroke.c",
 "lib/art/art_svp_wind.c", "lib/art/art_uta.c", "lib/art/art_uta_ops.c", "lib/art/art_uta_rect.c",
 "lib/art/art_uta_svp.c", "lib/art/art_uta_vpath.c", "lib/art/art_vpath.c", "lib/art/art_vpath_bpath.c",
-"lib/art/art_vpath_dash.c", "lib/art/art_vpath_svp.c", "lib/gocr/box.c", 
-"lib/gocr/database.c", "lib/gocr/detect.c", "lib/gocr/job.c", "lib/gocr/lines.c", "lib/gocr/list.c", 
-"lib/gocr/ocr0.c", "lib/gocr/ocr0n.c", "lib/gocr/ocr1.c", "lib/gocr/otsu.c", "lib/gocr/output.c", 
-"lib/gocr/pgm2asc.c", "lib/gocr/pixel.c", "lib/gocr/progress.c", "lib/gocr/remove.c", "lib/gocr/unicode.c",
-"lib/devices/ocr.c",
+"lib/art/art_vpath_dash.c", "lib/art/art_vpath_svp.c"
 ]
 gfxswf_sources = ["lib/devices/swf.c", "lib/readers/swf.c", "lib/readers/image.c"]
 

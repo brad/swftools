@@ -3,7 +3,7 @@ srcdir = @srcdir@
 top_srcdir = @top_srcdir@
 include ../../Makefile.common
 
-all: SWF.$(SLEXT) gfx.$(SLEXT)
+all: gfx.$(SLEXT)
 static: SWF$(A) gfx$(A)
 exe: mypython$(E) swfpython$(E) testmem$(E)
 
@@ -37,7 +37,7 @@ SWF$(A): $(SWF_OBJS) $(SWF_DEPS) Makefile
 	$(AR) cru SWF$(A) $(SWF_OBJS) $(SWF_DEPS)
 	$(RANLIB) SWF$(A)
 
-GFX_DEPS=../libpdf$(A) ../libgfxswf$(A)  ../librfxswf$(A) ../libgfx$(A) ../libocr$(A) ../libbase$(A) 
+GFX_DEPS=../libgfxpdf$(A) ../libgfxswf$(A)  ../librfxswf$(A) ../libgfx$(A) ../libbase$(A) 
 gfx.$(SLEXT): gfx.$(O) $(GFX_DEPS) Makefile
 	$(L) -g $(SHARED) gfx.$(O) -o gfx.$(SLEXT) $(GFX_DEPS) $(PYTHON_LIB) $(LIBS) $(CXXLIBS)
 gfx$(A): gfx.$(O) $(GFX_DEPS) Makefile

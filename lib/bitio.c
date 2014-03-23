@@ -28,7 +28,9 @@
 #endif
 #include <string.h>
 #include <memory.h>
+#define __USE_LARGEFILE64
 #include <fcntl.h>
+#include <errno.h>
 
 #include "../config.h"
 
@@ -49,9 +51,14 @@ static void reader_nullread_dealloc(reader_t*r)
 {
     memset(r, 0, sizeof(reader_t));
 }
+static int reader_nullseek(reader_t*r, int pos)
+{
+    return pos;
+}
 void reader_init_nullreader(reader_t*r)
 {
     r->read = reader_nullread;
+    r->seek = reader_nullseek;
     r->dealloc = reader_nullread_dealloc;
     r->internal = 0;
     r->type = READER_TYPE_NULL;
@@ -68,14 +75,43 @@ static int reader_fileread(reader_t*reader, void* data, int len)
 	reader->pos += ret;
     return ret;
 }
+static void reader_fileread_dealloc(reader_t*r)
+{
+    if(r->type == READER_TYPE_FILE2) {
+	close((ptroff_t)r->internal);
+    }
+    memset(r, 0, sizeof(reader_t));
+}
+static int reader_fileread_seek(reader_t*r, int pos)
+{
+    return lseek((ptroff_t)r->internal, pos, SEEK_SET);
+}
 void reader_init_filereader(reader_t*r, int handle)
 {
     r->read = reader_fileread;
+    r->seek = reader_fileread_seek;
+    r->dealloc = reader_fileread_dealloc;
     r->internal = (void*)handle;
     r->type = READER_TYPE_FILE;
     r->mybyte = 0;
     r->bitpos = 8;
     r->pos = 0;
+}
+int reader_init_filereader2(reader_t*r, const char*filename)
+{
+#ifdef HAVE_OPEN64
+    int fi = open64
+#else
+    int fi = open
+#endif
+    (filename,
+#ifdef O_BINARY
+	    O_BINARY|
+#endif
+	    O_RDONLY);
+    reader_init_filereader(r, fi);
+    r->type = READER_TYPE_FILE2;
+    return fi;
 }
 
 /* ---------------------------- mem reader ------------------------------- */
@@ -93,9 +129,20 @@ static int reader_memread(reader_t*reader, void* data, int len)
     if(mr->length - reader->pos < len) {
 	len = mr->length - reader->pos;
     }
+    if(!len) return 0;
     memcpy(data, &mr->data[reader->pos], len);
     reader->pos += len;
     return len;
+}
+static int reader_memseek(reader_t*reader, int pos)
+{
+    memread_t*mr = (memread_t*)reader->internal;
+    if(pos>=0 && pos<=mr->length) {
+	reader->pos = pos;
+	return pos;
+    } else {
+	return -1;
+    }
 }
 static void reader_memread_dealloc(reader_t*reader)
 {
@@ -109,6 +156,7 @@ void reader_init_memreader(reader_t*r, void*newdata, int newlength)
     mr->data = (unsigned char*)newdata;
     mr->length = newlength;
     r->read = reader_memread;
+    r->seek = reader_memseek;
     r->dealloc = reader_memread_dealloc;
     r->internal = (void*)mr;
     r->type = READER_TYPE_MEM;
@@ -116,6 +164,33 @@ void reader_init_memreader(reader_t*r, void*newdata, int newlength)
     r->bitpos = 8;
     r->pos = 0;
 } 
+
+/* ---------------------------- zzip reader ------------------------------ */
+#ifdef HAVE_ZZIP
+static int reader_zzip_read(reader_t*reader, void* data, int len) 
+{
+    return zzip_file_read((ZZIP_FILE*)reader->internal, data, len);
+}
+static void reader_zzip_dealloc(reader_t*reader)
+{
+    memset(reader, 0, sizeof(reader_t));
+}
+static int reader_zzip_seek(reader_t*reader, int pos)
+{
+    return zzip_seek((ZZIP_FILE*)reader->internal, pos, SEEK_SET);
+}
+void reader_init_zzipreader(reader_t*r,ZZIP_FILE*z)
+{
+    r->read = reader_zzip_read;
+    r->seek = reader_zzip_seek;
+    r->dealloc = reader_zzip_dealloc;
+    r->internal = z;
+    r->type = READER_TYPE_ZZIP;
+    r->mybyte = 0;
+    r->bitpos = 8;
+    r->pos = 0;
+}
+#endif
 
 /* ---------------------------- mem writer ------------------------------- */
 
@@ -262,7 +337,10 @@ static int writer_filewrite_write(writer_t*w, void* data, int len)
 {
     filewrite_t * fw= (filewrite_t*)w->internal;
     w->pos += len;
-    return write(fw->handle, data, len);
+    int l = write(fw->handle, data, len);
+    if(l < len)
+	fprintf(stderr, "Error writing to file: %d/%d", l, len);
+    return l;
 }
 static void writer_filewrite_finish(writer_t*w)
 {
@@ -288,7 +366,12 @@ void writer_init_filewriter(writer_t*w, int handle)
 }
 void writer_init_filewriter2(writer_t*w, char*filename)
 {
-    int fi = open("movie.swf",
+#ifdef HAVE_OPEN64
+    int fi = open64
+#else
+    int fi = open
+#endif
+    (filename,
 #ifdef O_BINARY
 	    O_BINARY|
 #endif
@@ -338,7 +421,7 @@ static void zlib_error(int ret, char* msg, z_stream*zs)
 	  msg,
 	  ret,
 	  zs->msg?zs->msg:"unknown");
-    perror("errno:");
+    if(errno) perror("errno:");
     exit(1);
 }
 #endif
@@ -390,6 +473,11 @@ static int reader_zlibinflate(reader_t*reader, void* data, int len)
     exit(1);
 #endif
 }
+static int reader_zlibseek(reader_t*reader, int pos)
+{
+    fprintf(stderr, "Erro: seeking not supported for zlib streams");
+    return -1;
+}
 static void reader_zlibinflate_dealloc(reader_t*reader)
 {
 #ifdef HAVE_ZLIB
@@ -411,6 +499,7 @@ void reader_init_zlibinflate(reader_t*r, reader_t*input)
     memset(r, 0, sizeof(reader_t));
     r->internal = z;
     r->read = reader_zlibinflate;
+    r->seek = reader_zlibseek;
     r->dealloc = reader_zlibinflate_dealloc;
     r->type = READER_TYPE_ZLIB;
     r->pos = 0;
@@ -652,6 +741,14 @@ U8 reader_readU8(reader_t*r)
     }
     return b;
 }
+S8 reader_readS8(reader_t*r)
+{
+    S8 b = 0;
+    if(r->read(r, &b, 1)<1) {
+	fprintf(stderr, "bitio.c:reader_readU8: Read over end of memory region\n");
+    }
+    return b;
+}
 U16 reader_readU16(reader_t*r)
 {
     U8 b1=0,b2=0;
@@ -676,6 +773,7 @@ U32 reader_readU32(reader_t*r)
 	fprintf(stderr, "bitio.c:reader_readU32: Read over end of memory region\n");
     return b1|b2<<8|b3<<16|b4<<24;
 }
+
 float reader_readFloat(reader_t*r)
 {
     float f;
@@ -715,6 +813,38 @@ char*reader_readString(reader_t*r)
     g.finish(&g);
     return string;
 }
+unsigned int read_compressed_uint(reader_t*r)
+{
+    unsigned int u = 0;
+    unsigned int b;
+    do {
+        b = reader_readU8(r);
+        u = u<<7|b&0x7f;
+    } while(b&0x80);
+    return u;
+}
+int read_compressed_int(reader_t*r)
+{
+    int i = 0;
+    int b;
+
+    b = reader_readS8(r);
+    i = b&0x7f;
+
+    if(b&0x40)
+        i|=0xffffff80; //sign extension
+
+    if(!(b&0x80))
+        return i;
+
+    do {
+        b = reader_readS8(r);
+        i = i<<7|b&0x7f;
+    } while(b&0x80);
+
+    return i;
+}
+
 
 void writer_writeString(writer_t*w, const char*s)
 {
@@ -782,4 +912,52 @@ void writer_writeDouble(writer_t*w, double f)
     w->write(w, &b6, 1);
     w->write(w, &b7, 1);
     w->write(w, &b8, 1);
+}
+void write_compressed_uint(writer_t*w, unsigned int u)
+{
+    if(u<0x80) {
+        writer_writeU8(w, u);
+    } else if(u<0x4000) {
+        writer_writeU8(w, u>>7|0x80);
+        writer_writeU8(w, u&0x7f);
+    } else if(u<0x200000) {
+        writer_writeU8(w, u>>14|0x80);
+        writer_writeU8(w, u>>7|0x80);
+        writer_writeU8(w, u&0x7f);
+    } else if(u<0x10000000) {
+        writer_writeU8(w, u>>21|0x80);
+        writer_writeU8(w, u>>14|0x80);
+        writer_writeU8(w, u>>7|0x80);
+        writer_writeU8(w, u&0x7f);
+    } else {
+        writer_writeU8(w, u>>28|0x80);
+        writer_writeU8(w, u>>21|0x80);
+        writer_writeU8(w, u>>14|0x80);
+        writer_writeU8(w, u>>7|0x80);
+        writer_writeU8(w, u&0x7f);
+    }
+}
+void write_compressed_int(writer_t*w, int i)
+{
+    if(i>=-0x40 && i<0x40) {
+        writer_writeU8(w, i&0x7f);
+    } else if(i>=-0x2000 && i<0x2000) {
+        writer_writeU8(w, (i>>7)&0x7f|0x80);
+        writer_writeU8(w, i&0x7f);
+    } else if(i>=-0x100000 && i<0x100000) {
+        writer_writeU8(w, (i>>14)&0x7f|0x80);
+        writer_writeU8(w, (i>>7)&0x7f|0x80);
+        writer_writeU8(w, (i)&0x7f);
+    } else if(i>=-0x8000000 && i<0x8000000) {
+        writer_writeU8(w, (i>>21)&0x7f|0x80);
+        writer_writeU8(w, (i>>14)&0x7f|0x80);
+        writer_writeU8(w, (i>>7)&0x7f|0x80);
+        writer_writeU8(w, (i)&0x7f);
+    } else {
+        writer_writeU8(w, (i>>28)&0x7f|0x80);
+        writer_writeU8(w, (i>>21)&0x7f|0x80);
+        writer_writeU8(w, (i>>14)&0x7f|0x80);
+        writer_writeU8(w, (i>>7)&0x7f|0x80);
+        writer_writeU8(w, (i)&0x7f);
+    }
 }

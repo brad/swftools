@@ -45,7 +45,6 @@
 #endif
 
 #include "./bitio.h"
-#include "./MD5.h"
 #include "./os.h"
 
 // internal constants
@@ -93,7 +92,7 @@ char* swf_GetString(TAG*t)
 U8 swf_GetU8(TAG * t)
 { swf_ResetReadBits(t);
   #ifdef DEBUG_RFXSWF
-    if (t->pos>=t->len) 
+    if ((int)t->pos>=(int)t->len) 
     { fprintf(stderr,"GetU8() out of bounds: TagID = %i\n",t->id);
       return 0;
     }
@@ -105,7 +104,7 @@ U16 swf_GetU16(TAG * t)
 { U16 res;
   swf_ResetReadBits(t);
   #ifdef DEBUG_RFXSWF
-    if (t->pos>(t->len-2)) 
+    if ((int)t->pos>((int)t->len-2)) 
     { fprintf(stderr,"GetU16() out of bounds: TagID = %i\n",t->id);
       return 0;
     }
@@ -119,7 +118,7 @@ U32 swf_GetU32(TAG * t)
 { U32 res;
   swf_ResetReadBits(t);
   #ifdef DEBUG_RFXSWF
-    if (t->pos>(t->len-4)) 
+    if ((int)t->pos>((int)t->len-4)) 
     { fprintf(stderr,"GetU32() out of bounds: TagID = %i\n",t->id);
       return 0;
     }
@@ -177,7 +176,9 @@ int swf_SetU16(TAG * t,U16 v)
 void swf_SetS16(TAG * t,int v)
 {
     if(v>32767 || v<-32768) {
+      #ifdef DEBUG_RFXSWF
 	fprintf(stderr, "Warning: S16 overflow: %d\n", v);
+      #endif
     }
     swf_SetU16(t, (S16)v);
 }
@@ -406,6 +407,113 @@ int swf_SetU30String(TAG*tag, const char*str, int l)
     swf_SetBlock(tag, (void*)str, l);
     return len;
 }
+
+float swf_GetF16(TAG * t)
+{
+    U16 f1 = swf_GetU16(t);
+    if(!(f1&0x3ff)) return 0.0;
+
+    // IEEE 16 is 1-5-10
+    // IEEE 32 is 1-8-23
+    /* gcc 4.1.2 seems to require a union here. *(float*)u doesn't work */
+    union {
+      U32 u;
+      float f;
+    } f2;
+
+    U16 e = (f1>>10)&0x1f;
+    U16 m = f1&0x3ff;
+    /* find highest bit in mantissa */
+    int h=0;
+    while(!(m&0x400)) {
+	m<<=1;
+	h++;
+    }
+    m&=0x3ff;
+    e -= h;
+    e += 0x6f;
+
+    f2.u = (f1&0x8000)<<16; //sign
+    f2.u |= e<<23; //exponent
+    f2.u |= m<<13; //mantissa
+    return *(float*)&f2;
+}
+
+void swf_SetF16(TAG * t, float f)
+{
+    union {
+      U32 u;
+      float f;
+    } v;
+    v.f = f;
+
+    U16 result = (v.u>>16)&0x8000; //sign
+    int exp = ((v.u>>23)&0xff)-0x7f+0x10;
+    U16 m = (v.u>>13)&0x3ff;
+    //fprintf(stderr, "%f: %04x sign, %d exp, %04x mantissa\n", f, result, exp, m);
+    if(exp<-10) {
+	// underflow (clamp to 0.0)
+	exp = 0;
+	m = 0;
+    } else if(exp<0) {
+        // partial underflow- strip some bits
+	m = (m|0x400)>>-exp;
+	exp = 0;
+    } else if(exp>=32) {
+	exp = 31;
+	m = 0x3ff;
+	fprintf(stderr, "Exponent overflow in FLOAT16 encoding\n");
+    } else {
+	exp++;
+	m = (m>>1)|0x200;
+    }
+    result |= exp<<10;
+    result |= m;
+    swf_SetU16(t, result);
+}
+
+float F16toFloat(U16 x)
+{
+    TAG t;
+    t.data = (void*)&x;
+    t.readBit = 0;
+    t.pos = 0;
+    t.len = 2;
+    return swf_GetF16(&t);
+}
+
+float floatToF16(float f)
+{
+    U16 u = 0;
+    TAG t;
+    t.data = (void*)&u;
+    t.len = 0;
+    t.memsize = 2;
+    t.writeBit = 0;
+    swf_SetF16(&t, f);
+    return u;
+}
+
+float swf_GetFloat(TAG *tag)
+{
+    union {
+        U32 uint_bits;
+        float float_bits;
+    } f;
+    f.uint_bits = swf_GetU32(tag);
+    return f.float_bits;
+}
+
+void swf_SetFloat(TAG *tag, float v)
+{
+    union {
+        U32 uint_bits;
+        float float_bits;
+    } f;
+    f.float_bits = v;
+    swf_SetU32(tag, f.uint_bits);
+}
+
 double swf_GetD64(TAG*tag)
 {
     /* FIXME: this is not big-endian compatible */
@@ -629,7 +737,9 @@ int swf_SetRect(TAG * t,SRECT * r)
   nbits = swf_CountBits(r->ymin,nbits);
   nbits = swf_CountBits(r->ymax,nbits);
   if(nbits>=32) {
+    #ifdef DEBUG_RFXSWF
     fprintf(stderr, "rfxswf: Warning: num_bits overflow in swf_SetRect\n");
+    #endif
     nbits=31;
   }
 
@@ -795,7 +905,9 @@ int swf_SetMatrix(TAG * t,MATRIX * m)
     nbits = swf_CountBits(m->sy,nbits);
     if(nbits>=32) {
         /* TODO: happens on AMD64 systems for normal values? */
+        #ifdef DEBUG_RFXSWF
 	fprintf(stderr,"rfxswf: Error: matrix values too large\n");
+        #endif
 	nbits = 31;
     }
     swf_SetBits(t,nbits,5);
@@ -809,7 +921,9 @@ int swf_SetMatrix(TAG * t,MATRIX * m)
     nbits = swf_CountBits(m->r0,0);
     nbits = swf_CountBits(m->r1,nbits);
     if(nbits>=32) {
+        #ifdef DEBUG_RFXSWF
 	fprintf(stderr,"rfxswf: Error: matrix values too large\n");
+        #endif
 	nbits = 31;
     }
     swf_SetBits(t,nbits,5);
@@ -820,7 +934,9 @@ int swf_SetMatrix(TAG * t,MATRIX * m)
   nbits = swf_CountBits(m->tx,0);
   nbits = swf_CountBits(m->ty,nbits);
   if(nbits>=32) {
+      #ifdef DEBUG_RFXSWF
       fprintf(stderr,"rfxswf: Error: matrix values too large\n");
+      #endif
       nbits = 31;
   }
   swf_SetBits(t,nbits,5);
@@ -930,12 +1046,12 @@ int swf_SetCXForm(TAG * t,CXFORM * cx,U8 alpha)
 
 void  swf_SetPassword(TAG * t, const char * password)
 {
+#ifdef HAVE_MD5
     /* WARNING: crypt_md5 is not reentrant */
     char salt[3];
     char* md5string;
 
 #if defined(HAVE_LRAND48) && defined(HAVE_SRAND48) && defined(HAVE_TIME_H) && defined(HAVE_TIME)
-    srand48(time(0));
     salt[0] = "abcdefghijklmnopqrstuvwxyz0123456789"[lrand48()%36];
     salt[1] = "abcdefghijklmnopqrstuvwxyz0123456789"[lrand48()%36];
 #else
@@ -949,7 +1065,10 @@ void  swf_SetPassword(TAG * t, const char * password)
     md5string = crypt_md5(password, salt);
 
     swf_SetU16(t,0);
-    swf_SetString(t, (U8*)md5string);
+    swf_SetString(t, md5string);
+#else
+    fprintf(stderr, "Error: No MD5 compiled in");
+#endif
 } 
 
 void swf_SetString(TAG*t, const char* s) 
@@ -957,12 +1076,13 @@ void swf_SetString(TAG*t, const char* s)
     if(!s) {
         swf_SetU8(t, 0);
     } else {
-        swf_SetBlock(t,s,strlen(s)+1);
+        swf_SetBlock(t,(U8*)s,strlen(s)+1);
     }
 }
 
 int swf_VerifyPassword(TAG * t, const char * password)
 {
+#ifdef HAVE_MD5
     char*md5string1, *md5string2;
     char*x;
     char*salt;
@@ -997,6 +1117,10 @@ int swf_VerifyPassword(TAG * t, const char * password)
     if(strcmp(md5string1, md5string2) != 0)
 	return 0;
     return 1;
+#else
+    fprintf(stderr, "Error: No MD5 compiled in");
+    return 1;
+#endif
 }
 
 // Tag List Manipulating Functions
@@ -1081,15 +1205,14 @@ TAG * swf_ReadTag(reader_t*reader, TAG * prev)
   int id;
 
   if (reader->read(reader, &raw, 2) !=2 ) return NULL;
-  raw = SWAP16(raw);
+  raw = LE_16_TO_NATIVE(raw);
 
   len = raw&0x3f;
   id  = raw>>6;
 
   if (len==0x3f)
   {
-      if (reader->read(reader, &len, 4) != 4) return NULL;
-      len = SWAP32(len);
+      len = reader_readU32(reader);
   }
 
   if (id==ST_DEFINESPRITE) len = 2*sizeof(U16);
@@ -1104,7 +1227,9 @@ TAG * swf_ReadTag(reader_t*reader, TAG * prev)
   { t->data = (U8*)rfx_alloc(t->len);
     t->memsize = t->len;
     if (reader->read(reader, t->data, t->len) != t->len) {
+      #ifdef DEBUG_RFXSWF
       fprintf(stderr, "rfxswf: Warning: Short read (tagid %d). File truncated?\n", t->id);
+      #endif
       free(t->data);t->data=0;
       free(t);
       return NULL;
@@ -1144,7 +1269,7 @@ int swf_WriteTag2(writer_t*writer, TAG * t)
 #endif
     
     if (short_tag)
-    { raw[0] = SWAP16(len|((t->id&0x3ff)<<6));
+    { raw[0] = LE_16_TO_NATIVE(len|((t->id&0x3ff)<<6));
       if (writer->write(writer,raw,2)!=2)
       {
         #ifdef DEBUG_RFXSWF
@@ -1155,7 +1280,7 @@ int swf_WriteTag2(writer_t*writer, TAG * t)
     }
     else
     {
-      raw[0] = SWAP16((t->id<<6)|0x3f);
+      raw[0] = LE_16_TO_NATIVE((t->id<<6)|0x3f);
       if (writer->write(writer,raw,2)!=2)
       {
 #ifdef DEBUG_RFXSWF
@@ -1164,14 +1289,7 @@ int swf_WriteTag2(writer_t*writer, TAG * t)
 	  return -1;
       }
       
-      len = SWAP32(len);
-      if (writer->write(writer,&len,4)!=4)
-      {
-        #ifdef DEBUG_RFXSWF
-          fprintf(stderr,"WriteTag() failed: Long Header (2).\n");
-        #endif
-        return -1;
-      }
+      writer_writeU32(writer, len);
     }
     
     if (t->data)
@@ -1283,7 +1401,9 @@ void swf_FoldSprite(TAG * t)
   if(t->id!=ST_DEFINESPRITE)
       return;
   if(!t->len) {
+    #ifdef DEBUG_RFXSWF
       fprintf(stderr, "Error: Sprite has no ID!");
+    #endif
       return;
   }
   if(t->len>4) {
@@ -1465,9 +1585,9 @@ int swf_ReadSWF2(reader_t*reader, SWF * swf)   // Reads SWF to memory (malloc'ed
 
     reader_GetRect(reader, &swf->movieSize);
     reader->read(reader, &swf->frameRate, 2);
-    swf->frameRate = SWAP16(swf->frameRate);
+    swf->frameRate = LE_16_TO_NATIVE(swf->frameRate);
     reader->read(reader, &swf->frameCount, 2);
-    swf->frameCount = SWAP16(swf->frameCount);
+    swf->frameCount = LE_16_TO_NATIVE(swf->frameCount);
 
     /* read tags and connect to list */
     t1.next = 0;
@@ -1561,13 +1681,24 @@ int WriteExtraTags(SWF*swf, writer_t*writer)
             }
             swf_DeleteTag(0, fileattrib);
         } else {
-            if(swf_WriteTag2(writer, has_fileattributes)<0) 
-                return -1;
+	    if(swf->fileAttributes) {
+	      /* if we're writing a file out again where we might have possible
+		 modified the fileattributes in the header, adjust the tag data */
+	      TAG*tt = swf_CopyTag(0,has_fileattributes);
+	      U32 flags = swf_GetU32(tt) | swf->fileAttributes;
+	      swf_ResetTag(tt, tt->id);
+	      swf_SetU32(tt, flags);
+	      if(swf_WriteTag2(writer, has_fileattributes)<0) return -1;
+	      swf_DeleteTag(0, tt);
+	    } else {
+		if(swf_WriteTag2(writer, has_fileattributes)<0) 
+		    return -1;
+	    }
         }
         if(0 && !has_scenedescription) {
             TAG*scene = swf_InsertTag(0, ST_SCENEDESCRIPTION);
             swf_SetU16(scene, 1);
-            swf_SetString(scene, (U8*)"Scene 1");
+            swf_SetString(scene, "Scene 1");
             swf_SetU8(scene, 0);
             if(writer) {
                 if(swf_WriteTag2(writer, scene)<0) 
@@ -1768,7 +1899,7 @@ int swf_WriteCGI(SWF * swf)
 
   sprintf(s,"Content-type: application/x-shockwave-flash\n"
             "Accept-Ranges: bytes\n"
-            "Content-Length: %lu\n"
+            "Content-Length: %d\n"
             "Expires: Thu, 13 Apr 2000 23:59:59 GMT\n"
             "\n",len);
             

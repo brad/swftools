@@ -1,4 +1,4 @@
-/* ast.c
+/* expr.c
 
    Extension module for the rfxswf library.
    Part of the swftools package.
@@ -90,16 +90,6 @@ static classinfo_t*join_types(classinfo_t*type1, classinfo_t*type2, nodetype_t*t
         return type1;
     return TYPE_ANY;
 }
-static char is_getlocal(code_t*c)
-{
-    if(!c || c->prev || c->next)
-        return 0;
-    return(c->opcode == OPCODE_GETLOCAL
-        || c->opcode == OPCODE_GETLOCAL_0
-        || c->opcode == OPCODE_GETLOCAL_1
-        || c->opcode == OPCODE_GETLOCAL_2
-        || c->opcode == OPCODE_GETLOCAL_3);
-}
 static int getlocalnr(code_t*c)
 {
     if(c->opcode == OPCODE_GETLOCAL) {return (ptroff_t)c->data[0];}
@@ -155,7 +145,8 @@ static code_t* toreadwrite(code_t*in, code_t*middlepart, char justassign, char r
                 prefix = abc_dup(prefix); // we need the object, too
             }
             use_temp_var = 1;
-        } else if(m->type == MULTINAMEL || m->type == MULTINAMELA) {
+        } else if(m->type == MULTINAMEL || m->type == MULTINAMELA ||
+		  m->type == RTQNAME || m->type == RTQNAMEA) {
             if(!justassign) {
                 /* dupping two values on the stack requires 5 operations and one register- 
                    couldn't adobe just have given us a dup2? */
@@ -2614,7 +2605,6 @@ typedcode_t node_const_read(node_t*n)
         case CONSTANT_UNKNOWN:
             syntaxerror("internal error: invalid constant");
         default: 
-            *(int*)0=0;
             syntaxerror("invalid constant (%d)", v->type);
 
     }
@@ -2646,7 +2636,16 @@ exec: node_const_exec
 
 typedcode_t node_code_write(node_t*n)
 {
-    syntaxerror("not implemented yet");
+    typedcode_t t;
+    t.c = 0;
+    int tmp = gettempvar();
+    t.c = abc_setlocal(t.c, tmp);
+    code_t*w = toreadwrite(n->code.c, abc_getlocal(0,tmp), 1, 0, 0);
+    t.c = code_append(t.c, w);
+    t.c = abc_kill(t.c, tmp);
+    n->code.c=0;
+    t.t = n->code.t;
+    return t;
 }
 typedcode_t node_code_read(node_t*n)
 {
@@ -2831,6 +2830,12 @@ typedcode_t node_read(node_t*n)
         node_free(n);
         return t;
     }
+}
+typedcode_t node_write(node_t*n)
+{
+    typedcode_t t = n->type->write(n);
+    node_free(n);
+    return t;
 }
 code_t* node_exec(node_t*n)
 {

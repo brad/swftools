@@ -34,7 +34,7 @@
 #define AS_FIRSTFRAME "if(!n) n=0;"
 #define AS_LASTFRAME "if(n<%d){n=n+1;gotoAndPlay(1);}else stop();"
 
-struct {
+static struct {
     float framerate;
     int max_image_width;
     int max_image_height;
@@ -222,6 +222,7 @@ TAG *MovieAddFrame(SWF * swf, TAG * t, char *sname, int id, int imgidx)
 
     GifFileType *gft;
     FILE *fi;
+    int ret;
 
     if ((fi = fopen(sname, "rb")) == NULL) {
         if (VERBOSE(1))
@@ -230,13 +231,22 @@ TAG *MovieAddFrame(SWF * swf, TAG * t, char *sname, int id, int imgidx)
     }
     fclose(fi);
 
-    if ((gft = DGifOpenFileName(sname)) == NULL) {
+#if defined(GIFLIB_MAJOR) && GIFLIB_MAJOR >= 5
+    gft = DGifOpenFileName(sname, NULL);
+#else
+    gft = DGifOpenFileName(sname);
+#endif
+    if (gft == NULL) {
         fprintf(stderr, "%s is not a GIF file!\n", sname);
         return t;
     }
 
-    if (DGifSlurp(gft) != GIF_OK) {
+    if ((ret = DGifSlurp(gft)) != GIF_OK) {
+#if defined(GIFLIB_MAJOR) && GIFLIB_MAJOR >= 5
+        fprintf(stderr, "GIF-LIB: %s\n", GifErrorString(ret));
+#else
         PrintGifError();
+#endif
         return t;
     }
 
@@ -247,6 +257,9 @@ TAG *MovieAddFrame(SWF * swf, TAG * t, char *sname, int id, int imgidx)
     memset(pal, 0, 256 * sizeof(RGBA));
 
     img = &gft->SavedImages[imgidx].ImageDesc;
+    if(!img) {
+        exit(1);
+    }
 
     // Local colormap has precedence over Global colormap
     colormap = img->ColorMap ? img->ColorMap : gft->SColorMap;
@@ -465,6 +478,7 @@ int CheckInputFile(char *fname, char **realname)
     FILE *fi;
     char *s = malloc(strlen(fname) + 5);
     GifFileType *gft;
+    int ret;
 
     if (!s)
         exit(2);
@@ -488,7 +502,12 @@ int CheckInputFile(char *fname, char **realname)
     }
     fclose(fi);
 
-    if ((gft = DGifOpenFileName(s)) == NULL) {
+#if defined(GIFLIB_MAJOR) && GIFLIB_MAJOR >= 5
+    gft = DGifOpenFileName(s, NULL);
+#else
+    gft = DGifOpenFileName(s);
+#endif
+    if (gft == NULL) {
         fprintf(stderr, "%s is not a GIF file!\n", fname);
         return -1;
     }
@@ -498,8 +517,12 @@ int CheckInputFile(char *fname, char **realname)
     if (global.max_image_height < gft->SHeight)
         global.max_image_height = gft->SHeight;
 
-    if (DGifSlurp(gft) != GIF_OK) { 
+    if ((ret = DGifSlurp(gft)) != GIF_OK) {
+#if defined(GIFLIB_MAJOR) && GIFLIB_MAJOR >= 5
+        fprintf(stderr, "GIF-LIB: %s\n", GifErrorString(ret));
+#else
         PrintGifError();
+#endif
         return -1;
     }
     // After DGifSlurp() call, gft->ImageCount become available

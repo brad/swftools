@@ -66,7 +66,7 @@ opcode_t opcodes[]={
 {0x4c, "callproplex", "2n",    -1, 1, 0, OP_STACK_ARGS|OP_STACK_NS},
 {0x46, "callproperty", "2n",   -1, 1, 0, OP_STACK_ARGS|OP_STACK_NS},
 {0x4f, "callpropvoid", "2n",   -1, 0, 0, OP_STACK_ARGS|OP_STACK_NS},
-{0x44, "callstatic", "in",     -1, 1, 0, OP_STACK_ARGS},
+{0x44, "callstatic", "mn",     -1, 1, 0, OP_STACK_ARGS},
 {0x45, "callsuper", "2n",      -1, 1, 0, OP_STACK_ARGS|OP_STACK_NS},
 {0x4e, "callsupervoid", "2n",  -1, 0, 0, OP_STACK_ARGS|OP_STACK_NS},
 {0x78, "checkfilter", "",      -1, 1, 0, 0},
@@ -197,6 +197,21 @@ opcode_t opcodes[]={
 {0x95, "typeof", "",           -1, 1, 0, 0},
 {0xa7, "urshift", "",          -2, 1, 0, 0},
 
+/* Alchemy opcodes */
+{0x3a, "si8", "",                -2, 0, 0, 0},
+{0x3b, "si16", "",               -2, 0, 0, 0},
+{0x3c, "si32", "",               -2, 0, 0, 0},
+{0x3d, "sf32", "",               -2, 0, 0, 0},
+{0x3e, "sf64", "",               -2, 0, 0, 0},
+{0x35, "li8", "",                -1, 1, 0, 0},
+{0x36, "li16", "",               -1, 1, 0, 0},
+{0x37, "li32", "",               -1, 1, 0, 0},
+{0x38, "lf32", "",               -1, 1, 0, 0},
+{0x39, "lf64", "",               -1, 1, 0, 0},
+{0x50, "sxi1", "",               -1, 1, 0, 0},
+{0x51, "sxi8", "",               -1, 1, 0, 0},
+{0x52, "sxi16", "",              -1, 1, 0, 0},
+
 /* opcodes not documented, but seen in the wild */
 {0x53, "applytype", "n",       -1, 1, 0, OP_STACK_ARGS}, //seen in builtin.abc
 
@@ -255,10 +270,10 @@ code_t* code_atposition(codelookup_t*l, int pos)
 
 void lookupswitch_print(lookupswitch_t*l)
 {
-    printf("default: %08x\n", l->def);
+    printf("default: %p\n", l->def);
     code_list_t*t = l->targets;
     while(t) {
-        printf("target: %08x\n", t->code);
+        printf("target: %p\n", t->code);
         t = t->next;
     }
 }
@@ -357,8 +372,7 @@ code_t*code_parse(TAG*tag, int len, abc_file_t*file, pool_t*pool, codelookup_t**
                 printf("Can't parse opcode param type \"%c\" (for op %02x %s).\n", *p, code->opcode, op->name);
                 return 0;
             }
-            if(data)
-                code->data[pos++] = data;
+            code->data[pos++] = data;
             p++;
         }
     }
@@ -845,7 +859,7 @@ static currentstats_t* code_get_stats(code_t*code, abc_exception_list_t*exceptio
     for(t=0;t<num;t++) {
         opcode_t*op = opcode_get(c->opcode);
         if(op->flags & (OP_JUMP|OP_BRANCH)) {
-            printf("%05d) %s %08x\n", t, op->name, c->branch);
+            printf("%05d) %s %p\n", t, op->name, c->branch);
         } else if(op->params[0]=='2') {
             printf("%05d) %s %s\n", t, op->name, multiname_tostring(c->data[0]));
         } else if(op->params[0]=='N') {
@@ -990,13 +1004,13 @@ int code_dump2(code_t*c, abc_exception_list_t*exceptions, abc_file_t*file, char*
                     if(c->branch)
                         fprintf(fo, "->%d", c->branch->pos);
                     else
-                        fprintf(fo, "%08x", c->branch);
+                        fprintf(fo, "%p", c->branch);
                 } else if(*p == 's') {
                     char*s = string_escape((string_t*)data);
                     fprintf(fo, "\"%s\"", s);
                     free(s);
                 } else if(*p == 'D') {
-                    fprintf(fo, "[register %02x=%s]", (ptroff_t)c->data[1], (char*)c->data[0]);
+                    fprintf(fo, "[register %02x=%s]", (int)(ptroff_t)c->data[1], (char*)c->data[0]);
                 } else if(*p == 'S') {
                     lookupswitch_t*l = c->data[0];
                     fprintf(fo, "[");
@@ -1223,6 +1237,19 @@ code_t*code_cutlast(code_t*c)
     if(!c) return c;
     assert(!c->next);
     return code_cut(c);
+}
+
+char is_getlocal(code_t*c)
+{
+    if(!c) return 0;
+    if(c->opcode == OPCODE_GETLOCAL ||
+       c->opcode == OPCODE_GETLOCAL_0 ||
+       c->opcode == OPCODE_GETLOCAL_1 ||
+       c->opcode == OPCODE_GETLOCAL_2 ||
+       c->opcode == OPCODE_GETLOCAL_3) {
+	return 1;
+    }
+    return 0;
 }
 
 code_t* cut_last_push(code_t*c)

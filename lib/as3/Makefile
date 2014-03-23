@@ -1,29 +1,37 @@
+include ../../Makefile.common
+
 all: parser swfdump mklib
 tests: testwrite testrewrite testpaths testreadwrite 
 
 D=-g -pg
 
-MODULES = abc.o opcodes.o code.o pool.o scripts.o expr.o common.o initcode.o
-SOURCES = abc.c abc.h pool.c pool.h files.c files.h code.c code.h registry.c registry.h opcodes.c opcodes.h builtin.c builtin.h compiler.c compiler.h parser.tab.h parser.tab.c tokenizer.yy.c scripts.c import.c import.h expr.c expr.h common.c common.h initcode.c initcode.h
+#BISONDEBUG=yes
+
+MODULES = abc.o opcodes.o code.o parser_help.o state.o pool.o scripts.o expr.o common.o initcode.o
+SOURCES = abc.c abc.h state.c state.h parser_help.c parser_help.h pool.c pool.h files.c files.h code.c code.h registry.c registry.h opcodes.c opcodes.h builtin.c builtin.h compiler.c compiler.h parser.tab.h parser.tab.c tokenizer.yy.c scripts.c import.c import.h expr.c expr.h common.c common.h initcode.c initcode.h assets.c assets.h
 
 tokenizer.yy.c: tokenizer.lex tokenizer.h
 	flex -Pas3_ -8 -B -otokenizer.yy.c tokenizer.lex
 
+ifeq "$(BISONDEBUG)" "yes"
+BISONDEBUGFLAGS=-t
+BISONDEBUGDEFINE=-DBISONDEBUG
+endif
 parser.tab.h parser.tab.c: parser.y parser.h skeleton.m4 Makefile
-	bison -S ./skeleton.m4 -v --defines -pa3_ parser.y -o parser.tab.c
+	bison $(BISONDEBUGFLAGS) -S ./skeleton.m4 -v --defines -pa3_ parser.y -o parser.tab.c
 
 main.o: main.c parser.tab.h parser.h
-	gcc $(D) -c main.c -o main.o
+	$(C) $(BISONDEBUGDEFINE) main.c -o main.o
 
 mklib.o: mklib.c parser.tab.h parser.h
-	gcc $(D) -c mklib.c -o mklib.o
+	$(C) mklib.c -o mklib.o
 
-parser: main.o tokenizer.yy.o ../librfxswf.a ../libbase.a parser.tab.h 
-	gcc $(D) main.o ../librfxswf.a ../libbase.a -o parser -lz
+parser: main.o tokenizer.yy.c ../librfxswf.a ../libbase.a parser.tab.h 
+	$(L) main.o ../librfxswf.a ../libbase.a -o parser -lz -lzzip
 
-rfxswf_modules=../drawer.o ../rfxswf.o ../modules/*.o ../lame/*.o ../action/*.o ../MD5.o $(MODULES)
-mklib: mklib.o $(rfxswf_modules) import.o registry.o tokenizer.yy.o parser.tab.o files.o compiler.o ../libbase.a
-	gcc $(D) mklib.o $(rfxswf_modules) import.o registry.o tokenizer.yy.o parser.tab.o files.o compiler.o ../libbase.a -o mklib -lz -lm -lfreetype -ljpeg
+rfxswf_modules=../drawer.o ../rfxswf.o ../modules/*.o ../lame/*.o ../action/*.o $(MODULES)
+mklib: mklib.o $(rfxswf_modules) import.o registry.o tokenizer.yy.o parser.tab.o files.o compiler.o assets.o ../libbase.a
+	$(L) mklib.o $(rfxswf_modules) import.o registry.o tokenizer.yy.o parser.tab.o files.o compiler.o assets.o ../libbase.a -o mklib $(LIBS)
 
 ../q.o: ../q.c ../q.h ../mem.h
 	cd ..; make q.o; cd -
@@ -35,22 +43,22 @@ mklib: mklib.o $(rfxswf_modules) import.o registry.o tokenizer.yy.o parser.tab.o
 	cd ..; make libbase.a
 
 swfdump: ../librfxswf.a ../../src/swfdump.c ../libbase.a $(SOURCES) ../q.c ../q.h
-	gcc -g ../../src/swfdump.c ../librfxswf.a ../libbase.a -ljpeg -lz -lfreetype -o swfdump
+	$(L) -g ../../src/swfdump.c ../librfxswf.a ../libbase.a -o swfdump $(LIBS)
 
 pdf2swf: ../librfxswf.a ../../src/pdf2swf.c ../libpdf.a ../libbase.a
-	g++ -g ../../src/pdf2swf.c ../libgfxswf.a ../libpdf.a ../libgfx.a ../librfxswf.a ../libbase.a -ljpeg -lz -lfreetype -lfontconfig -o pdf2swf 
+	$(LL) -g ../../src/pdf2swf.c ../libgfxswf.a ../libpdf.a ../libgfx.a ../librfxswf.a ../libbase.a -o pdf2swf $(LIBS)
 
 testreadwrite: testreadwrite.c ../librfxswf.a ../libbase.a
-	gcc $(D) -DMAIN -o testreadwrite testreadwrite.c ../librfxswf.a ../libbase.a -lz -ljpeg
+	$(L) -DMAIN -o testreadwrite testreadwrite.c ../librfxswf.a ../libbase.a $(LIBS)
 
 testrewrite: testrewrite.c ../librfxswf.a ../libbase.a
-	gcc $(D) -DMAIN -o testrewrite testrewrite.c ../librfxswf.a ../libbase.a -lz -ljpeg
+	$(L) -DMAIN -o testrewrite testrewrite.c ../librfxswf.a ../libbase.a $(LIBS)
 
 testwrite: testwrite.c ../librfxswf.a ../libbase.a
-	gcc $(D) -DMAIN -o testwrite testwrite.c ../librfxswf.a ../libbase.a -lz -ljpeg
+	$(L) -DMAIN -o testwrite testwrite.c ../librfxswf.a ../libbase.a $(LIBS)
 
 testpaths: testpaths.c ../librfxswf.a ../libbase.a
-	gcc $(D) -DMAIN -o testpaths testpaths.c ../librfxswf.a ../libbase.a -lz -ljpeg
+	$(L) -DMAIN -o testpaths testpaths.c ../librfxswf.a ../libbase.a $(LIBS)
 
 clean:
 	rm -f *.o *.yy.c *.tab.c *.tab.h testreadwrite swfdump testpaths testwrite ../librfxswf.a

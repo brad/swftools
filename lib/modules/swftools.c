@@ -584,10 +584,13 @@ void enumerateUsedIDs(TAG * tag, int base, void (*callback)(TAG*, int, void*), v
 	case ST_DEFINEBUTTONSOUND: {
 	    int t;
 	    callback(tag, tag->pos + base, callback_data);
+	    swf_GetU16(tag); //button id
 	    for(t=0;t<4;t++) {
 		int flags;
 		callback(tag, tag->pos + base, callback_data);
-		swf_GetU16(tag); //sound id
+		U16 sound_id = swf_GetU16(tag); //sound id
+		if(!sound_id)
+		    continue;
 		flags = swf_GetU8(tag);
 		if(flags&1)
 		    swf_GetU32(tag); // in point
@@ -612,6 +615,7 @@ void enumerateUsedIDs(TAG * tag, int base, void (*callback)(TAG*, int, void*), v
 	    callback(tag, tag->pos + base, callback_data); //button id
 	break;
 
+	case ST_SYMBOLCLASS:
 	case ST_EXPORTASSETS: {
 	    int num =  swf_GetU16(tag);
 	    int t;
@@ -642,7 +646,6 @@ void enumerateUsedIDs(TAG * tag, int base, void (*callback)(TAG*, int, void*), v
 
 	case ST_FREECHARACTER: /* unusual tags, which all start with an ID */
 	case ST_NAMECHARACTER:
-	case ST_DEFINEBINARY:
 	case ST_DEFINEFONTNAME:
 	case ST_GENERATORTEXT:
 	    callback(tag, tag->pos + base, callback_data);
@@ -973,11 +976,24 @@ char swf_Relocate (SWF*swf, char*bitmap)
     memset(slaveids, -1, sizeof(slaveids));
     tag = swf->firstTag;
     char ok = 1;
+
+    int current_id=0;
+#define NEW_ID(n) \
+		for(current_id++;current_id<65536;current_id++) { \
+		    if(!bitmap[current_id]) { \
+			n = current_id; \
+			break; \
+		    } \
+		} \
+                if(current_id==65536) { \
+                    fprintf(stderr, "swf_Relocate: Couldn't relocate: Out of IDs\n"); \
+                    return 0; \
+                }
+
     while(tag)
     {
 	int num; 
 	int *ptr;
-	int t;
 
 	if(swf_isDefiningTag(tag))
 	{
@@ -988,21 +1004,12 @@ char swf_Relocate (SWF*swf, char*bitmap)
 
 	    if(!bitmap[id]) { //free
 		newid = id;
+	    } else if(slaveids[id]>0) {
+		newid = slaveids[id];
 	    } else {
-		newid = 0;
-		for (t=1;t<65536;t++)
-		{
-		    if(!bitmap[t])
-		    {
-			newid = t;
-			break;
-		    }
-		}
-                if(t==65536) {
-                    fprintf(stderr, "swf_Relocate: Couldn't relocate: Out of IDs\n");
-                    return 0;
-                }
+		NEW_ID(newid);
 	    }
+
 	    bitmap[newid] = 1;
 	    slaveids[id] = newid;
 
@@ -1013,17 +1020,37 @@ char swf_Relocate (SWF*swf, char*bitmap)
 	if(num) {
 	    ptr = (int*)rfx_alloc(sizeof(int)*num);
 	    swf_GetUsedIDs(tag, ptr);
-
+	    int t;
 	    for(t=0;t<num;t++) {
 		int id = GET16(&tag->data[ptr[t]]);
 		if(slaveids[id]<0) {
-		    fprintf(stderr, "swf_Relocate: Mapping id (%d) never encountered before in %s\n", id,
-			    swf_TagGetName(tag));
-                    ok = 0;
+		    if(!id && bitmap[id]) {
+			/* id 0 is only used in SWF versions >=9. It's the ID of
+			   the main timeline. It's used in e.g. SYMBOLTAG tags, but
+			   never defined, so if we're asked to reallocate it, we have 
+			   to allocate an ID for it on the fly. */
+			int newid;
+			NEW_ID(newid);
+			bitmap[newid] = 1;
+			slaveids[id] = newid;
+			id = newid;
+		    } else if(!bitmap[id]) {
+			/* well- we don't know this id, but it's not reserved anyway, so just
+			   leave it alone */
+		    } else {
+			/* this actually happens with files created with Flash CS4 and never.
+			   Apparently e.g. DefineButton tags are able to use forward declarations of objects. */
+			fprintf(stderr, "warning: Mapping id (%d) never encountered before in %s\n", id,
+				swf_TagGetName(tag));
+			int newid;
+			NEW_ID(newid);
+			id = slaveids[id] = newid;
+			ok = 0;
+		    }
 		} else {
 		    id = slaveids[id];
-		    PUT16(&tag->data[ptr[t]], id);
 		}
+		PUT16(&tag->data[ptr[t]], id);
 	    }
             free(ptr);
 	}
@@ -1141,6 +1168,7 @@ U8 swf_isFontTag(TAG*tag)
 {
     if(tag->id == ST_DEFINEFONT ||
        tag->id == ST_DEFINEFONT2 ||
+       tag->id == ST_DEFINEFONT3 ||
        tag->id == ST_DEFINEFONTINFO)
         return 1;
     return 0;

@@ -182,7 +182,6 @@ ActionTAG* swf_ActionGet(TAG*tag)
 void swf_ActionFree(ActionTAG*action)
 {
     if(!action) {
-	fprintf(stderr, "Warning: freeing zero action");
 	return;
     }
     action = action->parent;
@@ -208,6 +207,9 @@ void swf_ActionFree(ActionTAG*action)
 
 void swf_ActionSet(TAG*tag, ActionTAG*action)
 {
+    if(!action) {
+	return;
+    }
     action=action->parent;
     while(action)
     {
@@ -279,12 +281,12 @@ int OpAdvance(char c, U8*data)
 	    U8* odata = data;
 	    int t;
 	    while(*data++); //name
-	    num = (*data++)*256; //num
-	    num += (*data++);
+	    num = (*data++); //num
+	    num += (*data++)*256;
 	    for(t=0;t<num;t++)
 		while(*data++); //param
-	    codesize = (*data++)*256; //num
-	    codesize += (*data++);
+	    codesize = (*data++); //num
+	    codesize += (*data++)*256;
 	    return data-odata;
 	}
     }
@@ -832,7 +834,7 @@ void action_fixjump(ActionMarker m1, ActionMarker m2)
 
     if (a1->op == ACTION_IF || a1->op == ACTION_JUMP) 
     {
-	*(U16*)(a1->data) = SWAP16(len);
+	*(U16*)(a1->data) = LE_16_TO_NATIVE(len);
     }
     else if(a1->op == ACTION_WAITFORFRAME)
     {
@@ -922,20 +924,20 @@ ActionTAG* action_End(ActionTAG*atag) {return swf_AddActionTAG(atag, ACTION_END,
 ActionTAG* action_GotoFrame(ActionTAG*atag, U16 frame) 
 {
     atag = swf_AddActionTAG(atag, ACTION_GOTOFRAME, 0, 2);
-    *(U16*)atag->tmp = SWAP16(frame);
+    *(U16*)atag->tmp = LE_16_TO_NATIVE(frame);
     return atag;
 }
 
 ActionTAG* action_Jump(ActionTAG*atag, U16 branch) 
 {
     atag = swf_AddActionTAG(atag, ACTION_JUMP, 0, 2);
-    *(U16*)atag->tmp = SWAP16(branch);
+    *(U16*)atag->tmp = LE_16_TO_NATIVE(branch);
     return atag;
 }
 ActionTAG* action_If(ActionTAG*atag, U16 branch) 
 {
     atag = swf_AddActionTAG(atag, ACTION_IF, 0, 2);
-    *(U16*)atag->tmp = SWAP16(branch);
+    *(U16*)atag->tmp = LE_16_TO_NATIVE(branch);
     return atag;
 }
 ActionTAG* action_StoreRegister(ActionTAG*atag, U8 reg) 
@@ -965,7 +967,7 @@ ActionTAG* action_WaitForFrame2(ActionTAG*atag, U8 skip)
 ActionTAG* action_WaitForFrame(ActionTAG*atag, U16 frame, U8 skip) 
 {
     atag = swf_AddActionTAG(atag, ACTION_WAITFORFRAME, 0, 3);
-    *(U16*)atag->tmp = SWAP16(frame);
+    *(U16*)atag->tmp = LE_16_TO_NATIVE(frame);
     *(U8*)&atag->tmp[2] = skip;
     return atag;
 }

@@ -19,12 +19,20 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <memory.h>
-#include "config.h"
 #include "FullBitmapOutputDev.h"
-#include "GFXOutputDev.h"
-#include "SplashBitmap.h"
-#include "SplashPattern.h"
-#include "Splash.h"
+#include "CharOutputDev.h"
+
+#ifdef HAVE_POPPLER
+  #include "splash/SplashBitmap.h"
+  #include "splash/SplashPattern.h"
+  #include "splash/Splash.h"
+#else
+  #include "xpdf/config.h"
+  #include "SplashBitmap.h"
+  #include "SplashPattern.h"
+  #include "Splash.h"
+#endif
+
 #include "../log.h"
 #include "../png.h"
 #include "../devices/record.h"
@@ -32,7 +40,8 @@
 static SplashColor splash_white = {255,255,255};
 static SplashColor splash_black = {0,0,0};
     
-FullBitmapOutputDev::FullBitmapOutputDev(InfoOutputDev*info, PDFDoc*doc)
+FullBitmapOutputDev::FullBitmapOutputDev(InfoOutputDev*info, PDFDoc*doc, int*page2page, int num_pages, int x, int y, int x1, int y1, int x2, int y2)
+:CommonOutputDev(info, doc, page2page, num_pages, x, y, x1, y1, x2, y2)
 {
     this->doc = doc;
     this->xref = doc->getXRef();
@@ -43,7 +52,7 @@ FullBitmapOutputDev::FullBitmapOutputDev(InfoOutputDev*info, PDFDoc*doc)
     this->rgbdev = new SplashOutputDev(splashModeRGB8, 1, gFalse, splash_white, gTrue, gTrue);
   
     /* device for handling links */
-    this->gfxdev = new GFXOutputDev(info, this->doc);
+    this->gfxdev = new CharOutputDev(info, this->doc, page2page, num_pages, x, y, x1, y1, x2, y2);
 
     this->rgbdev->startDoc(this->xref);
 }
@@ -70,28 +79,10 @@ void FullBitmapOutputDev::setDevice(gfxdevice_t*dev)
     this->dev = dev;
     gfxdev->setDevice(dev);
 }
-void FullBitmapOutputDev::setMove(int x,int y)
-{
-    this->user_movex = x;
-    this->user_movey = y;
-    gfxdev->setMove(x,y);
-}
-void FullBitmapOutputDev::setClip(int x1,int y1,int x2,int y2)
-{
-    this->user_clipx1 = x1;
-    this->user_clipy1 = y1;
-    this->user_clipx2 = x2;
-    this->user_clipy2 = y2;
-    gfxdev->setClip(x1,y1,x2,y2);
-}
+
 void FullBitmapOutputDev::setParameter(const char*key, const char*value)
 {
 }
-void FullBitmapOutputDev::setPageMap(int*pagemap, int pagemap_len)
-{
-    gfxdev->setPageMap(pagemap, pagemap_len);
-}
-
 static void getBitmapBBox(Guchar*alpha, int width, int height, int*xmin, int*ymin, int*xmax, int*ymax)
 {
     *ymin = -1;
@@ -193,29 +184,23 @@ void FullBitmapOutputDev::flushBitmap()
     free(img->data);img->data=0;free(img);img=0;
 }
 
-void FullBitmapOutputDev::startPage(int pageNum, GfxState *state, double crop_x1, double crop_y1, double crop_x2, double crop_y2)
+GBool FullBitmapOutputDev::checkPageSlice(Page *page, double hDPI, double vDPI,
+             int rotate, GBool useMediaBox, GBool crop,
+             int sliceX, int sliceY, int sliceW, int sliceH,
+             GBool printing, Catalog *catalog,
+             GBool (*abortCheckCbk)(void *data),
+             void *abortCheckCbkData)
 {
-    double x1,y1,x2,y2;
-    state->transform(crop_x1,crop_y1,&x1,&y1);
-    state->transform(crop_x2,crop_y2,&x2,&y2);
-    if(x2<x1) {double x3=x1;x1=x2;x2=x3;}
-    if(y2<y1) {double y3=y1;y1=y2;y2=y3;}
-    
-    this->movex = -(int)x1 - user_movex;
-    this->movey = -(int)y1 - user_movey;
-    
-    if(user_clipx1|user_clipy1|user_clipx2|user_clipy2) {
-        x1 = user_clipx1;
-        x2 = user_clipx2;
-        y1 = user_clipy1;
-        y2 = user_clipy2;
-    }
-    this->width = (int)(x2-x1);
-    this->height = (int)(y2-y1);
+    this->setPage(page);
+    gfxdev->setPage(page);
+    return gTrue;
+}
 
+void FullBitmapOutputDev::beginPage(GfxState *state, int pageNum)
+{
     msg("<debug> startPage");
-    rgbdev->startPage(pageNum, state, crop_x1, crop_y1, crop_x2, crop_y2);
-    gfxdev->startPage(pageNum, state, crop_x1, crop_y1, crop_x2, crop_y2);
+    rgbdev->startPage(pageNum, state);
+    gfxdev->startPage(pageNum, state);
 }
 
 void FullBitmapOutputDev::endPage()
@@ -395,42 +380,34 @@ void FullBitmapOutputDev::eoFill(GfxState *state)
     msg("<debug> eoFill");
     rgbdev->eoFill(state);
 }
-#if (xpdfMajorVersion*10000 + xpdfMinorVersion*100 + xpdfUpdateVersion) < 30207
-void FullBitmapOutputDev::tilingPatternFill(GfxState *state, Object *str,
+POPPLER_TILING_PATERN_RETURN FullBitmapOutputDev::tilingPatternFill(GfxState *state, POPPLER_TILING_PATERN_GFX
+             Object *str,
 			       int paintType, Dict *resDict,
 			       double *mat, double *bbox,
 			       int x0, int y0, int x1, int y1,
 			       double xStep, double yStep)
 {
     msg("<debug> tilingPatternFill");
-    rgbdev->tilingPatternFill(state, str, paintType, resDict, mat, bbox, x0, y0, x1, y1, xStep, yStep);
-}
-#else
-void FullBitmapOutputDev::tilingPatternFill(GfxState *state, Gfx *gfx, Object *str,
-			       int paintType, Dict *resDict,
-			       double *mat, double *bbox,
-			       int x0, int y0, int x1, int y1,
-			       double xStep, double yStep) 
-{
-    msg("<debug> tilingPatternFill");
-    rgbdev->tilingPatternFill(state, gfx, str, paintType, resDict, mat, bbox, x0, y0, x1, y1, xStep, yStep);
-}
+#ifdef HAVE_POPPLER
+    return
 #endif
+    rgbdev->tilingPatternFill(state, POPPLER_TILING_PATERN_GFX_ARG str, paintType, resDict, mat, bbox, x0, y0, x1, y1, xStep, yStep);
+}
 
 GBool FullBitmapOutputDev::functionShadedFill(GfxState *state, GfxFunctionShading *shading) 
 {
     msg("<debug> functionShadedFill");
     return rgbdev->functionShadedFill(state, shading);
 }
-GBool FullBitmapOutputDev::axialShadedFill(GfxState *state, GfxAxialShading *shading)
+GBool FullBitmapOutputDev::axialShadedFill(GfxState *state, GfxAxialShading *shading POPPLER_RAXIAL_MIN_MAX)
 {
     msg("<debug> axialShadedFill");
-    return rgbdev->axialShadedFill(state, shading);
+    return rgbdev->axialShadedFill(state, shading POPPLER_RAXIAL_MIN_MAX_ARG);
 }
-GBool FullBitmapOutputDev::radialShadedFill(GfxState *state, GfxRadialShading *shading)
+GBool FullBitmapOutputDev::radialShadedFill(GfxState *state, GfxRadialShading *shading POPPLER_RAXIAL_MIN_MAX)
 {
     msg("<debug> radialShadedFill");
-    return rgbdev->radialShadedFill(state, shading);
+    return rgbdev->radialShadedFill(state, shading POPPLER_RAXIAL_MIN_MAX_ARG);
 }
 
 void FullBitmapOutputDev::clip(GfxState *state)
@@ -517,37 +494,41 @@ void FullBitmapOutputDev::endType3Char(GfxState *state)
     rgbdev->endType3Char(state);
 }
 void FullBitmapOutputDev::drawImageMask(GfxState *state, Object *ref, Stream *str,
-			   int width, int height, GBool invert,
+			   int width, int height, GBool invert, POPPLER_INTERPOLATE
 			   GBool inlineImg)
 {
     msg("<debug> drawImageMask");
-    rgbdev->drawImageMask(state, ref, str, width, height, invert, inlineImg);
+    rgbdev->drawImageMask(state, ref, str, width, height, invert, POPPLER_INTERPOLATE_ARG inlineImg);
 }
 void FullBitmapOutputDev::drawImage(GfxState *state, Object *ref, Stream *str,
-		       int width, int height, GfxImageColorMap *colorMap,
+		       int width, int height, GfxImageColorMap *colorMap, POPPLER_INTERPOLATE
 		       int *maskColors, GBool inlineImg)
 {
     msg("<debug> drawImage");
-    rgbdev->drawImage(state, ref, str, width, height, colorMap, maskColors, inlineImg);
+    rgbdev->drawImage(state, ref, str, width, height, colorMap,
+      POPPLER_INTERPOLATE_ARG maskColors, inlineImg);
 }
 void FullBitmapOutputDev::drawMaskedImage(GfxState *state, Object *ref, Stream *str,
 			     int width, int height,
-			     GfxImageColorMap *colorMap,
+			     GfxImageColorMap *colorMap, POPPLER_INTERPOLATE
 			     Stream *maskStr, int maskWidth, int maskHeight,
-			     GBool maskInvert)
+			     GBool maskInvert POPPLER_MASK_INTERPOLATE)
 {
     msg("<debug> drawMaskedImage");
-    rgbdev->drawMaskedImage(state, ref, str, width, height, colorMap, maskStr, maskWidth, maskHeight, maskInvert);
+    rgbdev->drawMaskedImage(state, ref, str, width, height, colorMap,
+      POPPLER_INTERPOLATE_ARG maskStr, maskWidth, maskHeight,
+      maskInvert POPPLER_MASK_INTERPOLATE_ARG);
 }
 void FullBitmapOutputDev::drawSoftMaskedImage(GfxState *state, Object *ref, Stream *str,
 				 int width, int height,
-				 GfxImageColorMap *colorMap,
-				 Stream *maskStr,
-				 int maskWidth, int maskHeight,
-				 GfxImageColorMap *maskColorMap)
+				 GfxImageColorMap *colorMap, POPPLER_INTERPOLATE
+				 Stream *maskStr, int maskWidth, int maskHeight,
+				 GfxImageColorMap *maskColorMap POPPLER_MASK_INTERPOLATE)
 {
     msg("<debug> drawSoftMaskedImage");
-    rgbdev->drawSoftMaskedImage(state, ref, str, width, height, colorMap, maskStr, maskWidth, maskHeight, maskColorMap);
+    rgbdev->drawSoftMaskedImage(state, ref, str, width, height, colorMap,
+      POPPLER_INTERPOLATE_ARG maskStr, maskWidth, maskHeight,
+      maskColorMap POPPLER_MASK_INTERPOLATE_ARG);
 }
 void FullBitmapOutputDev::drawForm(Ref id)
 {

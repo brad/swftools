@@ -7,6 +7,16 @@ dnl new autoconf
 dnl AC_INIT
 dnl AC_CONFIG_SRCDIR([src/])
 
+# ------------------- option parsing -------------------------------
+
+DEBUG=
+CHECKMEM=
+PROFILING=
+ENABLE_WARNINGS=
+OPTIMIZE=
+USE_POPPLER=
+DISABLE_LAME=
+
 AC_ARG_ENABLE(checkmem,
 [  --enable-checkmem       turn on ccmalloc debugging], CHECKMEM=true)
 AC_ARG_ENABLE(debug,
@@ -17,15 +27,17 @@ AC_ARG_ENABLE(warnings,
 [  --enable-warnings	   turn on compiler warnings], ENABLE_WARNINGS=true)
 AC_ARG_ENABLE(optimizations,
 [  --enable-optimizations  turn on compiler optimizations (recommended for avi2swf)], OPTIMIZE=true)
+AC_ARG_ENABLE(poppler,
+[  --enable-poppler       link againist libpoppler], USE_POPPLER=true)
 AC_ARG_ENABLE(lame,
-[  --disable-lame          don't compile any L.A.M.E. mp3 encoding code in],
+[  --disable-lame          "don't compile any L.A.M.E. mp3 encoding code in"],
+
 if test "x$enable_lame" = "xno";then
     DISABLE_LAME=yes
 fi,DISABLE_LAME=)
 
 PACKAGE=swftools
-VERSION=0.9.0
-
+VERSION=0.9.2
 
 # ------------------------------------------------------------------
 
@@ -34,9 +46,9 @@ if test "x${srcdir}" != "x."; then
     exit 1
 fi
 
-WARNINGS="-Wparentheses -Wimplicit -Wreturn-type"
+WARNINGS="-Wimplicit -Wreturn-type -Wno-write-strings -Wformat"
 if test "x$ENABLE_WARNINGS" '!=' "x";then
-    WARNINGS="-Wall -Wno-unused -Wno-format -Wno-redundant-decls -D_FORTIFY_SOURCE=2 "
+    WARNINGS="-Wall -Wno-unused -Wno-format -Wno-redundant-decls -Wno-write-strings -D_FORTIFY_SOURCE=2 "
 fi
 
 if test "x$CHECKMEM" '!=' "x";then
@@ -49,11 +61,11 @@ if test "x$DEBUG" '!=' "x";then
     if test "x$PROFILING" = "x";then
         CFLAGS="$WARNINGS -O2 -g $CFLAGS"
         CXXFLAGS="$WARNINGS -O2 -g $CXXFLAGS"
-        LDFLAGS="-g $LIBS"
+        LDFLAGS="-g $LDFLAGS"
     else
         CFLAGS="$WARNINGS -O2 -g -pg $CFLAGS"
         CXXFLAGS="$WARNINGS -O2 -g -pg $CXXFLAGS"
-        LDFLAGS="-g -pg $LIBS"
+        LDFLAGS="-g -pg $LDFLAGS"
     fi
 else if test "x$OPTIMIZE" '!=' "x"; then
     CFLAGS="$WARNINGS -O3 -fomit-frame-pointer -Winline $CFLAGS"
@@ -81,6 +93,7 @@ dnl Checks for programs.
 
 AC_CANONICAL_HOST
 
+SLEXT="so"
 SHARED="-shared"
 MACOSX=
 case $host_os in
@@ -89,6 +102,7 @@ case $host_os in
 	CFLAGS="$CFLAGS"
 	CXXFLAGS="$CXXFLAGS -fno-rtti"
 	SHARED="-bundle"
+	SLEXT="bundle"
 	if test -d /opt/local/include && test -d /opt/local/lib; then
 	    CPPFLAGS="${CPPFLAGS} -I/opt/local/include"
 	    LDFLAGS="${LDFLAGS} -L/opt/local/lib"
@@ -159,7 +173,6 @@ AC_SUBST(AREXT)
 
 RFX_CHECK_MING
 
-SLEXT="so"
 if test "x${MINGW}" != "xyes"; then
     # no mingW
     AC_DEFINE([O_BINARY], [0], [Not defined on mingw])
@@ -200,7 +213,11 @@ fi
 
 # this must be done after (I believe) AC_PROG_MAKE_SET
 if test "x$DEBUG" '!=' "x" -o "x$STRIP" = "x";then
-    STRIP="@echo debug enabled, not stripping "
+    if test "$MACOSX";then
+	STRIP=dsymutil
+    else
+	STRIP="@echo debug enabled, not stripping "
+    fi
     export STRIP
     AC_SUBST(STRIP)
 fi
@@ -219,13 +236,15 @@ if test "x$ZLIBMISSING" = "xtrue";then
     echo
     exit
 fi
- 
+
+AC_CHECK_LIB(pdf, PDF_open_file,, PDFLIBMISSING=true)
 AC_CHECK_LIB(jpeg, jpeg_write_raw_data,, JPEGLIBMISSING=true)
 AC_CHECK_LIB(ungif, DGifOpen,, UNGIFMISSING=true)
 if test "$UNGIFMISSING";then
     UNGIFMISSING=
     AC_CHECK_LIB(gif, DGifOpen,, UNGIFMISSING=true)
 fi
+AC_CHECK_LIB(zzip, zzip_file_open,, ZZIPMISSING=true)
 
 RFX_CHECK_BYTEORDER
 AC_SUBST(WORDS_BIGENDIAN)
@@ -239,7 +258,7 @@ dnl Checks for header files.
  AC_HEADER_DIRENT
  AC_HEADER_STDC
 
- AC_CHECK_HEADERS(zlib.h gif_lib.h io.h wchar.h jpeglib.h assert.h signal.h pthread.h sys/stat.h sys/mman.h sys/types.h dirent.h sys/bsdtypes.h sys/ndir.h sys/dir.h ndir.h time.h sys/time.h sys/resource.h)
+ AC_CHECK_HEADERS(zlib.h gif_lib.h io.h jpeglib.h assert.h signal.h pthread.h sys/stat.h sys/mman.h sys/types.h dirent.h sys/bsdtypes.h sys/ndir.h sys/dir.h ndir.h time.h sys/time.h sys/resource.h pdflib.h zzip/lib.h)
 
 AC_DEFINE_UNQUOTED([PACKAGE], ["$PACKAGE"], [Name of package])
 AC_DEFINE_UNQUOTED([VERSION], ["$VERSION"], [Version number of package])
@@ -256,7 +275,7 @@ dnl Checks for typedefs, structures, and compiler characteristics.
  AC_TYPE_SIZE_T
  AC_STRUCT_TM
  AC_CHECK_TYPE(boolean,int) #needed for jpeglib
- AC_CHECK_FUNCS(popen wcschr wcsdup mkstemp stat mmap lrand48 rand srand48 srand bcopy bzero time getrusage mallinfo)
+ AC_CHECK_FUNCS(popen mkstemp stat mmap lrand48 rand srand48 srand bcopy bzero time getrusage mallinfo open64 calloc)
 
 AC_CHECK_SIZEOF([signed char])
 AC_CHECK_SIZEOF([signed short])
@@ -268,11 +287,14 @@ RFX_CHECK_FREETYPE
 
 RFX_CHECK_FONTCONFIG
 
-RFX_CHECK_OPENGL
-if test "$HAVE_OPENGL";then
-    DEVICE_OPENGL='devices/opengl.$(O)'
-    AC_SUBST(DEVICE_OPENGL)
-fi
+RFX_CHECK_FFTW
+
+# RFX_CHECK_OPENGL
+# if test "$HAVE_OPENGL";then
+#     DEVICE_OPENGL='devices/opengl.$(O)'
+#     AC_SUBST(DEVICE_OPENGL)
+# fi
+AC_SUBST(DEVICE_OPENGL)
 
 lame_in_source= 
 lame_makefile=
@@ -303,35 +325,37 @@ else
 fi
 AC_SUBST(lame_in_source)
 
-AC_DEFINE([INTERNAL_LIBART], [1], [use internal libart library])
-art_in_source='$(art_objects)'
-splash_in_source='$(splash_objects)'
-xpdf_in_source='$(xpdf_objects)'
+xpdf_in_source=
+splash_in_source=
+xpdf_include=
 
-dnl if test "x$USE_POPPLER" = "xtrue"; then
-dnl     xpdf_in_source=
-dnl     splash_in_source=
-dnl     AC_DEFINE([HAVE_POPPLER],[1],[use poppler])
-dnl     PKG_CHECK_MODULES([POPPLER],[poppler poppler-splash],,[poppler_pkgconfig=no])
-dnl     if test "x$poppler_pkgconfig" = "xno"; then
-dnl         AC_LANG_PUSH([C++])
-dnl         AC_CHECK_HEADERS([OutputDev.h],[
-dnl            AC_CHECK_LIB([poppler],[main],,[])
-dnl         ],[AC_MSG_ERROR([No poppler library found. This library is required.])])
-dnl         AC_LANG_POP
-dnl     else
-dnl 	CPPFLAGS="$CPPFLAGS $POPPLER_CFLAGS"
-dnl         AC_DEFINE([HAVE_POPPLER], [1])
-dnl         LIBS="$LIBS $POPPLER_LIBS"
-dnl     fi
-dnl fi
+if test "x$USE_POPPLER" = "xtrue"; then
+    AC_DEFINE([HAVE_POPPLER],[1],[use poppler])
+    #PKG_CHECK_MODULES([POPPLER],[poppler poppler-splash],,[poppler_pkgconfig=no])
+    if test "x$poppler_pkgconfig" = "xno"; then
+        AC_LANG_PUSH([C++])
+        AC_CHECK_HEADERS([OutputDev.h],[
+           AC_CHECK_LIB([poppler],[main],,[])
+        ],[AC_MSG_ERROR([No poppler library found. This library is required.])])
+        AC_LANG_POP
+    else
+        CPPFLAGS="$CPPFLAGS $POPPLER_CFLAGS"
+        LIBS="$LIBS $POPPLER_LIBS"
+        AC_DEFINE([HAVE_POPPLER], [1])
+    fi
+else
+    splash_in_source='$(splash_objects)'
+    xpdf_in_source='$(xpdf_objects)'
+    xpdf_include=' -I xpdf '
+fi
 
-AC_SUBST([art_in_source])
 AC_SUBST([xpdf_in_source])
 AC_SUBST([splash_in_source])
+AC_SUBST([xpdf_include])
 
 # ------------------------------------------------------------------
- 
+
+RFX_CHECK_LOWERCASE_UPPERCASE
 RFX_CHECK_AVI2SWF
 if test "x${AVIFILE}" = "xtrue"; then
     VIDEO_LIBS="$VIDEO_LIBS $AVIFILE_LIBS"
@@ -359,14 +383,18 @@ AC_SUBST(USE_GZIP)
 
 # ------------------------------------------------------------------
 
-RFX_CHECK_PYTHON
+RFX_CHECK_RUBY
 
-if test "x$PYTHON_OK" '!=' "xyes";then
-    echo all install uninstall clean: > lib/python/Makefile
+if test "x$RUBY_OK" '!=' "xyes";then
+    if test -d "lib/ruby/";then
+	echo all install uninstall clean: > lib/ruby/Makefile
+    fi
     # fail silently- the most users won't have any need for the
-    # python interface anyway
+    # ruby interface anyway
 else
-    pythonrfxswf="lib/python/Makefile"
+    if test -f "lib/ruby/Makefile.in";then
+	rubygfx="lib/ruby/Makefile"
+    fi
 fi
 
 # ------------------------------------------------------------------
@@ -384,6 +412,9 @@ if test "x$JPEGLIBMISSING" = "xtrue";then
     DISABLEJPEG2SWF=true
     PARTIAL=true
 fi
+if test "x$PDFLIBMISSING" = "xtrue";then
+    DISABLEPDF2PDF=true;
+fi
 #if test "x$T1LIBMISSING" = "xtrue";then
 #    MISSINGLIBS="${MISSINGLIBS} t1lib"
 #fi
@@ -393,6 +424,9 @@ if test "x$UNGIFMISSING" = "xtrue";then
     PARTIAL=true
 fi
 
+if test "x${ac_cv_header_pdflib_h}" '!=' "xyes";then
+    DISABLEPDF2PDF=true;
+fi
 if test "x${ac_cv_header_jpeglib_h}" '!=' "xyes"; then
     DISABLEPDF2SWF=true;
     DISABLEJPEG2SWF=true;
@@ -425,6 +459,18 @@ AC_MSG_RESULT(${MISSINGLIBS})
 
 # ------------------------------------------------------------------
 
+RFX_CHECK_PYTHON
+
+if test "x$PYTHON_OK" '!=' "xyes" -o "$DISABLEPDF2SWF";then
+    echo all install uninstall clean: > lib/python/Makefile
+    # fail silently- the most users won't have any need for the
+    # python interface anyway
+else
+    pythongfx="lib/python/Makefile"
+fi
+
+# ------------------------------------------------------------------
+
 if test "x${MISSINGLIBS}" '!=' "x"; then
   echo "***************************************************"
   echo "* The following headers/libraries are missing: " ${MISSINGLIBS}
@@ -445,13 +491,23 @@ LIBPDF='libpdf$(A)'
 if test "x${DISABLEPDF2SWF}" = "xtrue"; then
   echo "* Disabling pdf2swf tool..."
   rm -f lib/pdf/Makefile
-  echo all install uninstall clean libpdf: > lib/pdf/Makefile
+  echo all install uninstall clean libpdf libgfxpdf: > lib/pdf/Makefile
   pdf2swf_makefile=""
   PDF2SWF=
   LIBPDF=
 fi
 AC_SUBST(PDF2SWF)
 AC_SUBST(LIBPDF)
+
+PDF2PDF='pdf2pdf$(E)'
+DEVICE_PDF='devices/pdf.$(O)'
+if test "x${DISABLEPDF2PDF}" = "xtrue"; then
+  #echo "* Disabling pdf2pdf tool..."
+  PDF2PDF=
+  DEVICE_PDF=
+fi
+AC_SUBST(DEVICE_PDF)
+AC_SUBST(PDF2PDF)
 
 if test "x${ZLIBMISSING}" = "xtrue"; then
   echo
@@ -525,6 +581,18 @@ AH_BOTTOM([
 #ifdef HAVE_POPPLER
 #define GString GooString
 #define GHash GooHash
+#define GHashIter GooHashIter
+#endif
+
+#ifdef HAVE_ZZIP_LIB_H
+#ifdef HAVE_LIBZZIP
+#define HAVE_ZZIP 1
+#endif
+#endif
+
+// supply a substitute calloc function if necessary
+#ifndef HAVE_CALLOC
+#define calloc rfx_calloc_replacement
 #endif
 
 #endif // __config_h__
@@ -532,7 +600,7 @@ AH_BOTTOM([
 
 if test -f "release.in"; then release_in="./release"; fi
 if test -f "Makefile.new.in"; then mk_in="./Makefile.new"; fi
-FILES="$release_in $mk_in Makefile.common ${avi2swf} Makefile lib/Makefile lib/action/Makefile src/Makefile ${pdf2swf_makefile} swfs/Makefile ${pythonrfxswf} ${lame_makefile} lib/art/Makefile lib/readers/Makefile"
+FILES="$release_in $mk_in Makefile.common ${avi2swf} Makefile lib/Makefile lib/action/Makefile src/Makefile ${pdf2swf_makefile} swfs/Makefile ${pythongfx} ${rubygfx} ${lame_makefile} lib/readers/Makefile"
 AC_OUTPUT(${FILES})
 
 dnl new autoconf

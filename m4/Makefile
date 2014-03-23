@@ -1,8 +1,9 @@
 # simple pmake detecting Makefile
 
 all: clear  test.o
-clean: all
+clean: clear
 install:
+uninstall:
 
 CC=@echo "*******************************************************";\
     echo "Your make is broken- try to get yourself a working one.";\

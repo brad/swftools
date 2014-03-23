@@ -25,6 +25,8 @@
 #include "../lib/rfxswf.h"
 #include "../lib/args.h"
 #include "../lib/log.h"
+#include "../lib/jpeg.h"
+#include "../lib/png.h"
 #ifdef HAVE_ZLIB_H
 #ifdef HAVE_LIBZ
 #include "zlib.h"
@@ -42,6 +44,9 @@ char* extractjpegids = 0;
 char* extractfontids = 0;
 char* extractpngids = 0;
 char* extractsoundids = 0;
+char* extractmp3ids = 0;
+char* extractbinaryids = 0;
+char* extractanyids = 0;
 char extractmp3 = 0;
 
 char* extractname = 0;
@@ -51,6 +56,7 @@ char originalplaceobjects = 0;
 char movetozero = 0;
 
 int numextracts = 0;
+char *outputformat = NULL;
 
 struct options_t options[] =
 {
@@ -60,14 +66,18 @@ struct options_t options[] =
  {"i","id"},
  {"j","jpegs"},
  {"p","pngs"},
+ {"a","any"},
  {"P","placeobject"},
  {"0","movetozero"},
  {"m","mp3"},
+ {"M","embeddedmp3"},
  {"s","sound"},
  {"n","name"},
  {"f","frame"},
  {"F","font"},
  {"V","version"},
+ {"b","binary"},
+ {"O","outputformat"},
  {0,0}
 };
 
@@ -109,6 +119,15 @@ int args_callback_option(char*name,char*val)
 	numextracts++;
 	return 0;
     }
+    else if(!strcmp(name, "M")) {
+	if(extractsoundids) {
+	    fprintf(stderr, "Only one --embeddedmp3 argument is allowed. (Try to use a range, e.g. -M 1,2,3)\n");
+	    exit(1);
+	}
+	numextracts++;
+	extractmp3ids = val;
+	return 1;
+    } 
     else if(!strcmp(name, "j")) {
 	if(extractjpegids) {
 	    fprintf(stderr, "Only one --jpegs argument is allowed. (Try to use a range, e.g. -j 1,2,3)\n");
@@ -137,6 +156,15 @@ int args_callback_option(char*name,char*val)
 	extractsoundids = val;
 	return 1;
     } 
+    else if(!strcmp(name, "b")) {
+	if(extractbinaryids) {
+	    fprintf(stderr, "Only one --binary argument is allowed. (Try to use a range, e.g. -s 1,2,3)\n");
+	    exit(1);
+	}
+	numextracts++;
+	extractbinaryids = val;
+	return 1;
+    } 
 #ifdef _ZLIB_INCLUDED_
     else if(!strcmp(name, "p")) {
 	if(extractpngids) {
@@ -148,6 +176,11 @@ int args_callback_option(char*name,char*val)
 	return 1;
     } 
 #endif
+    else if(!strcmp(name, "a")) {
+	numextracts++;
+	extractanyids = val;
+	return 1;
+    }
     else if(!strcmp(name, "f")) {
 	numextracts++;
 	extractframes = val;
@@ -164,6 +197,10 @@ int args_callback_option(char*name,char*val)
     else if(!strcmp(name, "w")) {
 	hollow = 1;
 	return 0;
+    }
+    else if (!strcmp(name, "O")) {
+      outputformat = val;
+	return 1;
     }
     else {
         printf("Unknown option: -%s\n", name);
@@ -200,6 +237,7 @@ void args_callback_usage(char*name)
     printf("\n");
     printf("Sound extraction:\n");
     printf("\t-m , --mp3\t\t\t Extract main mp3 stream\n");
+    printf("\t-M , --embeddedmp3\t\t\t Extract embedded mp3 stream(s)\n");
     printf("\t-s , --sound ID\t\t\t Extract Sound(s)\n");
 }
 int args_callback_command(char*name,char*val)
@@ -210,6 +248,23 @@ int args_callback_command(char*name,char*val)
     }
     filename = name;
     return 0;
+}
+
+void prepare_name(char *buf, size_t len, const char *prefix, 
+		  const char *suffix, int idx) {
+  if (outputformat!=NULL) {
+    // override default file name formatting
+    // make sure single-file behavior is not used
+    numextracts = -1;
+    // Other parts of codebase use vsnprintf, so I assume snprintf
+    // is available on all platforms that swftools currently works on.
+    // We need to check for buffer overflows now that the user is 
+    // supplying the format string.
+    snprintf(buf,len,outputformat,idx,suffix);
+  } else {
+    // use default file name formatting, unchanged
+    sprintf(buf,"%s%d.%s",prefix,idx,suffix);
+  }
 }
 
 U8 mainr,maing,mainb;
@@ -483,9 +538,31 @@ int isOfType(int t, TAG*tag)
     if(t == 4 && (tag->id == ST_DEFINESOUND)) {
 	show = 1;
     }
-    if(t == 5 && (tag->id == ST_DEFINEFONT || tag->id == ST_DEFINEFONT2)) {
+    if(t == 5 && (tag->id == ST_DEFINEFONT || tag->id == ST_DEFINEFONT2 || tag->id == ST_DEFINEFONT3)) {
 	show = 1;
     }
+    if (t== 6 && (tag->id == ST_DEFINEBINARY)) {
+        show = 1;
+    }
+    if (t== 7 && (tag->id == ST_DEFINESPRITE)) {
+	int wasFolded = swf_IsFolded(tag);
+	TAG *toFold = tag;
+
+	if(wasFolded) 
+	    swf_UnFoldSprite(tag);
+
+        while(tag->id != ST_END) { 
+	    tag = tag->next;
+            if(tag->id == ST_SOUNDSTREAMHEAD || tag->id == ST_SOUNDSTREAMHEAD2) {
+                show = 1;
+                break;
+	    }
+	}
+
+	if(wasFolded) 
+	    swf_FoldSprite(toFold);
+    }
+
     return show;
 }
 
@@ -495,8 +572,8 @@ void listObjects(SWF*swf)
     char first;
     int t;
     int frame = 0;
-    char*names[] = {"Shape", "MovieClip", "JPEG", "PNG", "Sound", "Font"};
-    char*options[] = {"-i", "-i", "-j", "-p", "-s", "-F"};
+    char*names[] = {"Shape", "MovieClip", "JPEG", "PNG", "Sound", "Font", "Binary", "Embedded MP3"};
+    char*options[] = {"-i", "-i", "-j", "-p", "-s", "-F","-b","-M"};
     int mp3=0;
     printf("Objects in file %s:\n",filename);
     swf_FoldAll(swf);
@@ -567,7 +644,7 @@ void listObjects(SWF*swf)
 	printf(" [-m] 1 MP3 Soundstream\n");
 }
 
-void handlefont(SWF*swf, TAG*tag)
+int handlefont(SWF*swf, TAG*tag)
 {
     SWFFONT* f=0;
     U16 id;
@@ -576,21 +653,22 @@ void handlefont(SWF*swf, TAG*tag)
     int t;
 
     id = swf_GetDefineID(tag);
-    sprintf(name, "font%d.swf", id);
+    prepare_name(name, sizeof(name), "font", "swf", id);
     if(numextracts==1) {
 	filename = destfilename;
     }
 
     swf_FontExtract(swf, id, &f);
     if(!f) {
-	printf("Couldn't extract font %d\n", id);
-	return;
+	if (!extractanyids) {
+	   printf("Couldn't extract font %d\n", id);
+ 	}
+	return 0;
     }
-    if(!f->layout)
-	swf_FontCreateLayout(f);
 
     swf_WriteFont(f, filename);
     swf_FontFree(f);
+    return 1;
 }
 
 static char has_jpegtables=0;
@@ -632,18 +710,28 @@ int findjpegboundary(U8*data, int len)
 }
 
 /* extract jpeg data out of a tag */
-void handlejpeg(TAG*tag)
+int handlejpeg(TAG*tag)
 {
     char name[80];
     char*filename = name;
     FILE*fi;
-    
-    sprintf(name, "pic%d.jpg", GET16(tag->data));
-    if(numextracts==1) {
-	filename = destfilename;
-	if(!strcmp(filename,"output.swf"))
-	    filename = "output.jpg";
+   
+    if(tag->id != ST_DEFINEBITSJPEG3) {
+	prepare_name(name, sizeof(name), "pic", "jpg", GET16(tag->data));
+	if(numextracts==1) {
+	    filename = destfilename;
+	    if(!strcmp(filename,"output.swf"))
+		filename = "output.jpg";
+	}
+    } else {
+	prepare_name(name, sizeof(name), "pic", "png", GET16(tag->data));
+	if(numextracts==1) {
+	    filename = destfilename;
+	    if(!strcmp(filename,"output.swf"))
+		filename = "output.png";
+	}
     }
+
     /* swf jpeg images have two streams, which both start with ff d8 and
        end with ff d9. The following code handles sorting the middle
        <ff d9 ff d8> bytes out, so that one stream remains */
@@ -674,24 +762,44 @@ void handlejpeg(TAG*tag)
     }
     else if(tag->id == ST_DEFINEBITSJPEG3 && tag->len>6) {
 	U32 end = GET32(&tag->data[2])+6;
-	int pos = findjpegboundary(&tag->data[6], tag->len-6);
-	if(pos<0) {
-            fi = save_fopen(filename, "wb");
-            fwrite(&tag->data[6], end-6, 1, fi);
-            fclose(fi);
-        } else {
-            pos+=6;
-            fi = save_fopen(filename, "wb");
-            fwrite(&tag->data[6], pos-6, 1, fi);
-            fwrite(&tag->data[pos+4], end-(pos+4), 1, fi);
-            fclose(fi);
-        }
+	int pos = findjpegboundary(&tag->data[6], end);
+	if(end >= tag->len) {
+	    msg("<error> zlib data out of bounds in definebitsjpeg3");
+	    return 0;
+	}
+        if(pos) {
+	    /* TODO: do we actually need this? */
+	    memmove(&tag->data[pos], &tag->data[pos+4], end-(pos+4));
+	}
+	unsigned char*image;
+	unsigned width=0, height=0;
+	jpeg_load_from_mem(&tag->data[6], end-6, &image, &width, &height);
+
+	uLongf datalen = width*height;
+	Bytef *data = malloc(datalen);
+
+	int error = uncompress(data, &datalen, &tag->data[end], (uLong)(tag->len - end));
+	if(error != Z_OK) {
+	  fprintf(stderr, "Zlib error %d\n", error);
+	  return 0;
+	}
+	int t, size = width*height;
+	for(t=0;t<size;t++) {
+	    image[t*4+0] = data[t];
+	}
+	free(data);
+	png_write(filename, image, width, height);
+	free(image);
     }
     else {
 	int id = GET16(tag->data);
-	fprintf(stderr, "Object %d is not a JPEG picture!\n",id, jpegtables);
-	exit(1);
+	if (!extractanyids) {
+	  fprintf(stderr, "Object %d is not a JPEG picture!\n", id);
+	  exit(1);
+        }
+	return 0;
     }
+    return 1;
 }
 
 #ifdef _ZLIB_INCLUDED_
@@ -722,7 +830,7 @@ static inline void png_write_byte(FILE*fi, U8 byte)
 static void png_start_chunk(FILE*fi, char*type, int len)
 {
     U8 mytype[4]={0,0,0,0};
-    U32 mylen = REVERSESWAP32(len);
+    U32 mylen = BE_32_TO_NATIVE(len);
     memcpy(mytype,type,strlen(type));
     fwrite(&mylen, 4, 1, fi);
     mycrc32=0xffffffff;
@@ -746,7 +854,7 @@ static void png_write_dword(FILE*fi, U32 dword)
 }
 static void png_end_chunk(FILE*fi)
 {
-    U32 tmp = REVERSESWAP32((mycrc32^0xffffffff));
+    U32 tmp = BE_32_TO_NATIVE((mycrc32^0xffffffff));
     fwrite(&tmp,4,1,fi);
 }
 
@@ -755,7 +863,7 @@ static void png_end_chunk(FILE*fi)
    This routine was originally meant to be a one-pager. I just
    didn't know png is _that_ much fun. :) -mk
  */
-void handlelossless(TAG*tag)
+int handlelossless(TAG*tag)
 {
     char name[80];
     char*filename = name;
@@ -786,8 +894,11 @@ void handlelossless(TAG*tag)
     if(tag->id != ST_DEFINEBITSLOSSLESS &&
        tag->id != ST_DEFINEBITSLOSSLESS2) {
 	int id = GET16(tag->data);
-	fprintf(stderr, "Object %d is not a PNG picture!\n",id);
-	exit(1);
+	if (!extractanyids) {
+	  fprintf(stderr, "Object %d is not a PNG picture!\n",id);
+	  exit(1);
+	}
+	return 0;
     }
 
     id =swf_GetU16(tag);
@@ -800,7 +911,7 @@ void handlelossless(TAG*tag)
 	fprintf(stderr, "Can't handle 16-bit palette images yet (image %d)\n",id);
 	else 
 	fprintf(stderr, "Unknown image type %d in image %d\n", format, id);
-	return;
+	return 0;
     }
     width = swf_GetU16(tag);
     height = swf_GetU16(tag);
@@ -827,11 +938,11 @@ void handlelossless(TAG*tag)
     } while(error == Z_BUF_ERROR);
     if(error != Z_OK) {
 	fprintf(stderr, "Zlib error %d (image %d)\n", error, id);
-	return;
+	return 0;
     }
     msg("<verbose> Uncompressed image is %d bytes (%d colormap)", datalen, (3+alpha)*cols);
     pos = 0;
-    datalen2 = datalen;
+    datalen2 = datalen+16;
     data2 = malloc(datalen2);
     palette = (RGBA*)malloc(cols*sizeof(RGBA));
 
@@ -844,7 +955,7 @@ void handlelossless(TAG*tag)
 	}
     }
 
-    sprintf(name, "pic%d.png", id);
+    prepare_name(name, sizeof(name), "pic", "png", id);
     if(numextracts==1) {
 	filename = destfilename;
 	if(!strcmp(filename,"output.swf"))
@@ -863,7 +974,7 @@ void handlelossless(TAG*tag)
      png_write_byte(fi,2); //rgb
      else if(format == 5 && alpha==1)
      png_write_byte(fi,6); //rgba
-     else return;
+     else return 0;
 
      png_write_byte(fi,0); //compression mode
      png_write_byte(fi,0); //filter mode
@@ -929,7 +1040,7 @@ void handlelossless(TAG*tag)
 
     if(compress (data2, &datalen2, data3, datalen3) != Z_OK) {
 	fprintf(stderr, "zlib error in pic %d\n", id);
-	return;
+	return 0;
     }
     msg("<verbose> Compressed data is %d bytes", datalen2);
     png_start_chunk(fi, "IDAT", datalen2);
@@ -941,6 +1052,7 @@ void handlelossless(TAG*tag)
     free(data);
     free(data2);
     free(data3);
+    return 1;
 }
 #endif
 
@@ -977,7 +1089,7 @@ void handlesoundstream(TAG*tag)
     }
 }
 
-void handledefinesound(TAG*tag)
+int handledefinesound(TAG*tag)
 {
     U8 flags;
     U32 samples;
@@ -1011,8 +1123,10 @@ void handledefinesound(TAG*tag)
     } else if(format == 1) { // adpcm
 	printf("Sound is ADPCM, format: %s samples/sec, %d bit, %s\n", rates[rate], bits, stereo?"stereo":"mono");
 	extension = "adpcm";
+    } else {
+        return 0;
     }
-    sprintf(buf, "sound%d.%s", id, extension);
+    prepare_name(buf, sizeof(buf), "sound", extension, id);
     if(numextracts==1) {
 	filename = destfilename;
 	if(!strcmp(filename,"output.swf")) {
@@ -1023,6 +1137,67 @@ void handledefinesound(TAG*tag)
     fi = save_fopen(filename, "wb");
     fwrite(&tag->data[tag->pos], tag->len - tag->pos, 1, fi);
     fclose(fi);
+    return 1;
+}
+
+int handlebinary(TAG*tag) {
+    FILE *fout = NULL;
+    char buf[100];
+    char *filename = buf;
+    int len = tag->memsize;
+    int dx = 6; // offset to binary data
+    if (tag->id!=ST_DEFINEBINARY) {
+        if (!extractanyids) {
+          fprintf(stderr, "Object %d is not a binary entity!\n",
+                          GET16(tag->data));
+        }
+        return 0;
+    }
+    prepare_name(buf, sizeof(buf), "binary", "bin", GET16(tag->data));
+    if(numextracts==1) {
+	filename = destfilename;
+	if(!strcmp(filename,"output.swf")) {
+	    sprintf(buf, "output.bin");
+	    filename = buf;
+	}
+    }
+    fout = fopen(filename, "wb");
+    fwrite(tag->data+dx,len-dx,1,fout);
+    fclose(fout);
+    return 1;
+}
+
+int handleembeddedmp3(TAG*tag) {
+    int wasFolded;
+    TAG *toFold;
+
+    if (tag->id!=ST_DEFINESPRITE) {
+        if (!extractanyids) {
+          fprintf(stderr, "Object %d is not a sprite entity!\n",
+                          GET16(tag->data));
+        }
+        return 0;
+    }
+
+    wasFolded = swf_IsFolded(tag);
+    toFold = tag;
+
+    if(wasFolded) 
+	swf_UnFoldSprite(tag);
+
+    while(tag->id != ST_END) { 
+	tag = tag->next;
+	if(tag->id == ST_SOUNDSTREAMHEAD ||
+	   tag->id == ST_SOUNDSTREAMHEAD2 ||
+	   tag->id == ST_SOUNDSTREAMBLOCK) {
+ 	   handlesoundstream(tag);
+	}
+    }
+
+    if(wasFolded) 
+	swf_FoldSprite(toFold);
+
+    return 1;
 }
 
 int main (int argc,char ** argv)
@@ -1038,7 +1213,8 @@ int main (int argc,char ** argv)
     processargs(argc, argv);
 
     if(!extractframes && !extractids && ! extractname && !extractjpegids && !extractpngids
-	&& !extractmp3 && !extractsoundids && !extractfontids)
+	&& !extractmp3 && !extractsoundids && !extractfontids && !extractbinaryids 
+        && !extractanyids && !extractmp3ids)
 	listavailable = 1;
 
     if(!originalplaceobjects && movetozero) {
@@ -1143,11 +1319,37 @@ int main (int argc,char ** argv)
 	    if(extractsoundids && is_in_range(id, extractsoundids)) {
 		handledefinesound(tag);
 	    }
+	    if(extractmp3ids && is_in_range(id, extractmp3ids)) {
+		handleembeddedmp3(tag);
+	    }
+	    if(extractbinaryids && is_in_range(id, extractbinaryids)) {
+		handlebinary(tag);
+	    }
 #ifdef _ZLIB_INCLUDED_
 	    if(extractpngids && is_in_range(id, extractpngids)) {
 		handlelossless(tag);
 	    }
 #endif
+	    if(extractanyids && is_in_range(id, extractanyids)) {
+	        if (handlefont(&swf,tag)) {
+		    // pass
+		} else if (handlejpeg(tag)) {
+		    // pass
+		} else if (handlebinary(tag)) {
+		    // pass
+#ifdef _ZLIB_INCLUDED_
+		} else if (handlelossless(tag)) {
+		    // pass
+#endif
+		} else if (handledefinesound(tag)) {
+		    // Not sure if sound code checks carefully for type.
+		    // pass
+		} else if (handleembeddedmp3(tag)) {
+		    // pass
+		} else {
+		    printf("#%d not processed\n", id);
+		}
+	    }
 	}
 	else if (tag->id == ST_SETBACKGROUNDCOLOR) {
 	    mainr = tag->data[0];

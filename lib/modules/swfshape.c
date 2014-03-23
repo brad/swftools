@@ -474,7 +474,7 @@ int swf_ShapeSetCurve(TAG * t,SHAPE * s,S32 x,S32 y,S32 ax,S32 ay)
 
     if(b >= 18) {
           fprintf(stderr, "Bit overflow in swf_ShapeSetCurve- %d (%d,%d,%d,%d)\n", b, ax,ay,x,y);
-          b = 17;
+	  return swf_ShapeSetLine(t, s, x+ax, y+ay);
     }
 
     swf_SetBits(t,2,2);
@@ -616,6 +616,35 @@ static int parseFillStyleArray(TAG*tag, SHAPE2*shape)
     return 1;
 }
 
+char swf_ShapeIsEmpty(SHAPE*s)
+{
+    if(!s || !s->data) return 1;
+    TAG _tag;
+    TAG* tag = &_tag;
+    memset(tag, 0, sizeof(TAG));
+    tag->data = s->data;
+    tag->len = tag->memsize = (s->bitlen+7)/8;
+    tag->pos = 0;
+    
+    while(1) {
+	if(!swf_GetBits(tag, 1)) {
+	    U16 flags = swf_GetBits(tag, 5);
+	    if(!flags) break;
+	    if(flags&1) { //move
+		int n = swf_GetBits(tag, 5); 
+		swf_GetSBits(tag, n); //x
+		swf_GetSBits(tag, n); //y
+	    }
+	    if(flags&2) swf_GetBits(tag, s->bits.fill);
+	    if(flags&4) swf_GetBits(tag, s->bits.fill);
+	    if(flags&8) swf_GetBits(tag, s->bits.line);
+	    if(flags&16) {return 0;}
+	} else {
+	    return 0;
+	}
+    }
+    return 1;
+}
 
 /* todo: merge this with swf_GetSimpleShape */
 static SHAPELINE* swf_ParseShapeData(U8*data, int bits, int fillbits, int linebits, int version, SHAPE2*shape2)
@@ -886,6 +915,59 @@ void swf_ShapeSetBitmapRect(TAG*tag, U16 gfxid, int width, int height)
     swf_ShapeSetLine(tag,shape,0,-height*20);
     swf_ShapeSetEnd(tag);
     swf_ShapeFree(shape);
+}
+
+void swf_ShapeSetRectangle(TAG*tag, U16 shapeid, int width, int height, RGBA*rgba)
+{
+    RGBA white={255,255,255,255};
+    if(!rgba) {
+	rgba = &white;
+    }
+    SHAPE* s;
+    swf_ShapeNew(&s);
+    int fs = swf_ShapeAddSolidFillStyle(s, rgba);
+    swf_SetU16(tag,shapeid);
+    SRECT r;
+    r.xmin = 0;
+    r.xmax = 0;
+    r.ymin = width;
+    r.ymax = height;
+    swf_SetRect(tag,&r);
+    swf_SetShapeHeader(tag,s);
+    swf_ShapeSetAll(tag,s,0,0,0,fs,0);
+    swf_ShapeSetLine(tag,s,width,0);
+    swf_ShapeSetLine(tag,s,0,height);
+    swf_ShapeSetLine(tag,s,-width,0);
+    swf_ShapeSetLine(tag,s,0,-height);
+    swf_ShapeSetEnd(tag);
+    swf_ShapeFree(s);
+}
+
+void swf_ShapeSetRectangleWithBorder(TAG*tag, U16 shapeid, int width, int height, RGBA*rgba, int linewidth, RGBA*linecolor)
+{
+    RGBA white={255,255,255,255};
+    if(!rgba) {
+	rgba = &white;
+    }
+    SHAPE* s;
+    swf_ShapeNew(&s);
+    int fs = swf_ShapeAddSolidFillStyle(s, rgba);
+    int ls = swf_ShapeAddLineStyle(s, linewidth, linecolor);
+    swf_SetU16(tag,shapeid);
+    SRECT r;
+    r.xmin = 0;
+    r.xmax = 0;
+    r.ymin = width;
+    r.ymax = height;
+    swf_SetRect(tag,&r);
+    swf_SetShapeHeader(tag,s);
+    swf_ShapeSetAll(tag,s,0,0,ls,fs,0);
+    swf_ShapeSetLine(tag,s,width,0);
+    swf_ShapeSetLine(tag,s,0,height);
+    swf_ShapeSetLine(tag,s,-width,0);
+    swf_ShapeSetLine(tag,s,0,-height);
+    swf_ShapeSetEnd(tag);
+    swf_ShapeFree(s);
 }
 
 void swf_Shape2ToShape(SHAPE2*shape2, SHAPE*shape)

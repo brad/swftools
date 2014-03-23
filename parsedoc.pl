@@ -42,6 +42,7 @@ sub add_option_to_help
     my $s1 = " "x(2-length($shortopt));
     my $s2 = " "x(20-length($longopt." ".$params));
     $doc =~ s/"/\\"/g;
+    $doc =~ s/%/%%/g;
     $paramhelp .= "    printf(\"-$shortopt$s1, --$longopt $params$s2$doc\\n\");\n";
 }
 
@@ -56,18 +57,20 @@ sub add_header_to_manpage
     my $newusage = "";
     chomp $date;
 
-    split(/\n/,$usage);
+    $long_description =~ s/([^\\])-/\1\\-/g;
+    
+    my @chunks = split(/\n/,$usage);
     my $p  = "";
-    foreach my $u (@_) {
+    foreach my $u (@chunks) {
 	$u =~ s/%s/$progname/g;
 	$newusage .= "$p.B $u\n";
 	$p = ".PP\n";
     }
-
+    $newusage =~ s/([^\\])-/\1\\-/g;
     print manpage << "EOF"
 .TH $progname "1" "$date" "$progname" "$package"
 .SH NAME
-$progname - $short_description
+$progname \\- $short_description
 .SH Synopsis
 $newusage
 .SH DESCRIPTION
@@ -147,6 +150,7 @@ my $tail = "";
 while(<fi>) {
     $tail .= $_;
 }
+$tail =~ s/([^\\])-/\1\\-/g;
 
 print manpage $tail;
 close(manpage);
@@ -177,13 +181,14 @@ while(<$cfile>)
 	while(<$cfile>) {
 	    last if(/}\s*$/);
 	}
-	split(/\n/,$usage);
+	my @chunks = split(/\n/,$usage);
 	my $prefix = "Usage:";
 	my $u;
-	foreach $u (@_) {
+	foreach $u (@chunks) {
 	    if($u =~ /%s/) {
 		$src .= "    printf(\"$prefix $u\\n\", name);\n";
 	    } else {
+                $u =~ s/%/%%/;
 		$src .= "    printf(\"$prefix $u\\n\");\n";
 	    }
 	    $prefix = "OR:   ";

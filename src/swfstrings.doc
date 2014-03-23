@@ -1,0 +1,25 @@
+Usage: %s [options] file.swf
+
+Extracts strings from SWF files.
+
+This tool extracts strings from SWF files. It parses SWF font records
+and text records and prints unicode-encoded characters to stdout.
+
+-f --fonts
+    Print out font information for each text block
+-x --xpos <x>
+    Set bounding box x coordinate
+-y --ypos <y>
+    Set bounding box y coordinate
+-W --width <width>
+    Set bounding box width
+-H --height <height>
+    Set bounding box height
+-V --version  
+    Print version information and exit
+
+.SH AUTHORS
+
+Rainer Böhme <rfxswf@reflex-studio.de>
+.TP
+Matthias Kramm <kramm@quiss.org>

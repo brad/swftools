@@ -23,7 +23,6 @@
 
 #include <time.h>
 #include "abc.h"
-#include "../MD5.h"
 
 void swf_AddButtonLinks(SWF*swf, char stop_each_frame, char events)
 {
@@ -31,24 +30,21 @@ void swf_AddButtonLinks(SWF*swf, char stop_each_frame, char events)
     int has_buttons = 0;
     TAG*tag=swf->firstTag;
 
-    void*md5 = init_md5();
-
+    unsigned int checksum = 0;
     while(tag) {
         if(tag->id == ST_SHOWFRAME)
             num_frames++;
         if(tag->id == ST_DEFINEBUTTON || tag->id == ST_DEFINEBUTTON2)
             has_buttons = 1;
-	update_md5(md5, tag->data, tag->len);
+	crc32_add_bytes(checksum, tag->data, tag->len);
         tag = tag->next;
     }
     int t = time(0);
-    update_md5(md5, (unsigned char*)&t, sizeof(t));
+    checksum = crc32_add_bytes(checksum, &t, sizeof(t));
 
     unsigned char h[16];
     unsigned char file_signature[33];
-    finish_md5(md5, h);
-    sprintf(file_signature, "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
-	    h[0],h[1],h[2],h[3],h[4],h[5],h[6],h[7],h[8],h[9],h[10],h[11],h[12],h[13],h[14],h[15]);
+    sprintf((char*)file_signature, "%x", checksum);
 
     char scenename1[80], scenename2[80];
     sprintf(scenename1, "rfx.MainTimeline_%s", file_signature);
@@ -174,7 +170,7 @@ void swf_AddButtonLinks(SWF*swf, char stop_each_frame, char events)
                         __ findpropstrict(h,"flash.net::navigateToURL");
                         __ findpropstrict(h,"flash.net::URLRequest");
                         // TODO: target _blank
-                        __ pushstring(h,oldaction->data); //url
+                        __ pushstring(h,(char*)oldaction->data); //url
                         __ constructprop(h,"flash.net::URLRequest", 1);
                         __ callpropvoid(h,"flash.net::navigateToURL", 1);
                     } else {
@@ -183,7 +179,7 @@ void swf_AddButtonLinks(SWF*swf, char stop_each_frame, char events)
                         __ pushstring(h, "link");
                         __ pushtrue(h);
                         __ pushtrue(h);
-                        __ pushstring(h,oldaction->data); //url
+                        __ pushstring(h,(char*)oldaction->data); //url
                         __ constructprop(h,"[package]flash.events::TextEvent", 4);
                         __ callpropvoid(h,"[package]::dispatchEvent", 1);
                     }

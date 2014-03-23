@@ -77,10 +77,9 @@ extern char start_of_expression;
 
 typedef token_t*tokenptr_t;
 
-extern trie_t*active_namespaces;
-
 #include "parser.tab.h"
 
+extern char*token2string(enum yytokentype nr, YYSTYPE v);
 extern unsigned int as3_tokencount;
 
 void as3_buffer_input(void*buffer, int len);

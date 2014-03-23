@@ -1514,8 +1514,8 @@ int main(int argn, char*argv[])
     TAG * tag;
     RGBA* pic, *pic2, rgb;
     SWFPLACEOBJECT obj;
-    int width = 0;
-    int height = 0;
+    unsigned width = 0;
+    unsigned height = 0;
     int frames = 10;
     int framerate = 29;
     unsigned char*data;
@@ -1532,7 +1532,7 @@ int main(int argn, char*argv[])
 
     memset(&stream, 0, sizeof(stream));
 
-    getPNG(fname, &width, &height, &data);
+    png_load(fname, &width, &height, &data);
     pic = (RGBA*)rfx_alloc(width*height*sizeof(RGBA));
     pic2 = (RGBA*)rfx_alloc(width*height*sizeof(RGBA));
     memcpy(pic, data, width*height*sizeof(RGBA));

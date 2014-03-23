@@ -50,16 +50,11 @@
 /* Define if you have the unistd.h header file */
 #undef HAVE_UNISTD_H
 
-/* for gocr */
-#undef HAVE_WCHAR_H
-#undef HAVE_WCSCHR
-#undef HAVE_WCSDUP
+/* Define if you have the open64 function.  */
+#undef HAVE_OPEN64
 
 /* Define if you have the lrand48 function.  */
 #undef HAVE_LRAND48
-
-/* Define if you have the mkstemp function.  */
-#undef HAVE_MKSTEMP
 
 /* Define if you have the popen function.  */
 #undef HAVE_POPEN
@@ -78,6 +73,9 @@
 
 /* Define if you have the srand48 function.  */
 #undef HAVE_SRAND48
+
+/* Define if you have the calloc function.  */
+#undef HAVE_CALLOC
 
 /* Define if you have the stat function.  */
 #undef HAVE_STAT
@@ -130,6 +128,12 @@
 /* Define if you have the <zlib.h> header file.  */
 #undef HAVE_ZLIB_H
 
+/* Define if you have the <zzip/lib.h> header file.  */
+#undef HAVE_ZZIP_LIB_H
+
+/* Define if you have the <pdflib.h> header file.  */
+#undef HAVE_PDFLIB_H
+
 /* Define if you have the <avifile/version.h> header file.  */
 #undef HAVE_AVIFILE_VERSION_H
 
@@ -161,8 +165,13 @@
 #undef HAVE_OUTPUTDEV_H
 
 /* Define if you have the jpeg library (-ljpeg).  */
-/* Define if you have the jpeg library (-ljpeg).  */
 #undef HAVE_LIBJPEG
+
+/* Define if you have the pdf library (-lpdf).  */
+#undef HAVE_LIBPDF
+
+/* Define if you have the zzip library (-lzzip). */
+#undef HAVE_LIBZZIP
 
 /* Define if you have the m library (-lm).  */
 #undef HAVE_LIBM
@@ -172,15 +181,6 @@
 
 /* Define if you have the z library (-lz).  */
 #undef HAVE_LIBZ
-
-/* use internal libart library */
-#undef INTERNAL_LIBART
-
-/* Define to 1 if you have the `art_lgpl_2' library (-lart_lgpl_2). */
-#undef HAVE_LIBART_LGPL_2
-
-/* Define to 1 if you have the <libart_lgpl/libart.h> header file. */
-#undef HAVE_LIBART_LGPL_LIBART_H
 
 /* Name of package */
 #undef PACKAGE
@@ -207,6 +207,10 @@
 #undef HAVE_FONTCONFIG_H
 #undef HAVE_FONTCONFIG
 
+#undef HAVE_FFTW3_H
+
+#undef HAVE_FFTW3
+
 /* have/use internal l.a.m.e. mp3 library */
 #undef HAVE_LAME 
 
@@ -218,6 +222,8 @@
 
 /* Define to 1 if this machine has network byte order*/
 #undef WORDS_BIGENDIAN
+
+#undef LOWERCASE_UPPERCASE
 
 /* Define to 0 on non-windows systems */
 #undef O_BINARY
@@ -255,6 +261,21 @@
 #ifdef HAVE_POPPLER
 #define GString GooString
 #define GHash GooHash
+#endif
+
+#ifdef HAVE_ZZIP_LIB_H
+#ifdef HAVE_LIBZZIP
+#define HAVE_ZZIP 1
+#endif
+#endif
+
+//#ifdef HAVE_BUILTIN_EXPECT
+#if defined(__GNUC__) && (__GNUC__ > 2) && defined(__OPTIMIZE__)
+# define likely(x)      __builtin_expect((x), 1)
+# define unlikely(x)    __builtin_expect((x), 0)
+#else
+# define likely(x)      (x)
+# define unlikely(x)    (x)
 #endif
 
 #endif

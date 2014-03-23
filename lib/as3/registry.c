@@ -27,6 +27,7 @@
 #include "builtin.h"
 
 dict_t*registry_classes=0;
+asset_bundle_list_t*assets=0;
 
 // ----------------------- class signature ------------------------------
 
@@ -71,6 +72,58 @@ type_t memberinfo_type = {
     free: (free_func)dummy_destroy,
 };
 
+// ----------------------- assets -------------------------------------
+static void use_asset(asset_bundle_t*a)
+{
+    a->used = 1;
+    asset_bundle_list_t*l = a->dependencies;
+    while(l) {
+	if(!l->asset_bundle->used) {
+	    use_asset(l->asset_bundle);
+	}
+	l = l->next;
+    }
+}
+void registry_use(slotinfo_t*s)
+{
+    if(!s) return;
+    if(!(s->flags&FLAG_USED)) {
+	s->flags |= FLAG_USED;
+	if(s->kind == INFOTYPE_CLASS) {
+	    classinfo_t*c=(classinfo_t*)s;
+	    if(c->assets) {
+		use_asset(c->assets);
+	    }
+	    int t=0;
+	    while(c->interfaces[t]) {
+		registry_use((slotinfo_t*)c->interfaces[t]);
+		t++;
+	    }
+	    while(c->superclass) {
+		c = c->superclass;
+		registry_use((slotinfo_t*)c);
+	    }
+	} else if(s->kind == INFOTYPE_METHOD) {
+	    methodinfo_t*m=(methodinfo_t*)s;
+	    if(m->parent) {
+		registry_use((slotinfo_t*)m->parent);
+	    }
+	} else if(s->kind == INFOTYPE_VAR) {
+	    varinfo_t*v=(varinfo_t*)s;
+	    if(v->parent) {
+		registry_use((slotinfo_t*)v->parent);
+	    }
+	}
+    }
+}
+void registry_add_asset(asset_bundle_t*bundle)
+{
+    list_append(assets, bundle);
+}
+asset_bundle_list_t*registry_getassets()
+{
+    return assets;
+}
 // ----------------------- resolving ----------------------------------
 slotinfo_t* registry_resolve(slotinfo_t*_s)
 {
@@ -114,9 +167,14 @@ static void resolve_on_class(slotinfo_t*_cls)
 {
     classinfo_t*cls = (classinfo_t*)_cls;
     cls->superclass = (classinfo_t*)registry_resolve((slotinfo_t*)cls->superclass);
+	
     DICT_ITERATE_DATA(&cls->members,slotinfo_t*,m) {
-        resolve_on_slot(m);
+	resolve_on_slot(m);
     }
+    DICT_ITERATE_DATA(&cls->static_members,slotinfo_t*,m2) {
+	resolve_on_slot(m2);
+    }
+
     int t=0;
     while(cls->interfaces[t]) {
         cls->interfaces[t] = (classinfo_t*)registry_resolve((slotinfo_t*)cls->interfaces[t]);
@@ -152,11 +210,12 @@ classinfo_t* classinfo_register(int access, const char*package, const char*name,
     c->name = name;
     dict_put(registry_classes, c, c);
     dict_init2(&c->members, &memberinfo_type, AVERAGE_NUMBER_OF_MEMBERS);
+    dict_init2(&c->static_members, &memberinfo_type, AVERAGE_NUMBER_OF_MEMBERS);
 
     schedule_for_resolve((slotinfo_t*)c);
     return c;
 }
-methodinfo_t* methodinfo_register_onclass(classinfo_t*cls, U8 access, const char*ns, const char*name)
+methodinfo_t* methodinfo_register_onclass(classinfo_t*cls, U8 access, const char*ns, const char*name, char is_static)
 {
     NEW(methodinfo_t,m);
     m->kind = INFOTYPE_METHOD;
@@ -164,10 +223,13 @@ methodinfo_t* methodinfo_register_onclass(classinfo_t*cls, U8 access, const char
     m->name = name;
     m->package = ns;
     m->parent = cls;
-    dict_put(&cls->members, m, m);
+    if(!is_static) 
+	dict_put(&cls->members, m, m);
+    else
+	dict_put(&cls->static_members, m, m);
     return m;
 }
-varinfo_t* varinfo_register_onclass(classinfo_t*cls, U8 access, const char*ns, const char*name)
+varinfo_t* varinfo_register_onclass(classinfo_t*cls, U8 access, const char*ns, const char*name, char is_static)
 {
     NEW(varinfo_t,m);
     m->kind = INFOTYPE_VAR;
@@ -175,7 +237,10 @@ varinfo_t* varinfo_register_onclass(classinfo_t*cls, U8 access, const char*ns, c
     m->name = name;
     m->package = ns;
     m->parent = cls;
-    dict_put(&cls->members, m, m);
+    if(!is_static) 
+	dict_put(&cls->members, m, m);
+    else
+	dict_put(&cls->static_members, m, m);
     return m;
 }
 methodinfo_t* methodinfo_register_global(U8 access, const char*package, const char*name)
@@ -247,14 +312,17 @@ void registry_dump()
     }
 }
 
-memberinfo_t* registry_findmember(classinfo_t*cls, const char*ns, const char*name, char recursive)
+memberinfo_t* registry_findmember(classinfo_t*cls, const char*ns, const char*name, char recursive, char is_static)
 {
     memberinfo_t tmp;
     tmp.name = name;
     tmp.package = ns?ns:"";
 
     if(!recursive) {
-        return (memberinfo_t*)dict_lookup(&cls->members, &tmp);
+	if(!is_static) 
+	    return (memberinfo_t*)dict_lookup(&cls->members, &tmp);
+	else
+	    return (memberinfo_t*)dict_lookup(&cls->static_members, &tmp);
     }
     /* look at classes directly extended by this class */
     slotinfo_t*m = 0;
@@ -267,10 +335,13 @@ memberinfo_t* registry_findmember(classinfo_t*cls, const char*ns, const char*nam
         if(s->kind == INFOTYPE_UNRESOLVED)
             break;
 
-        m = (slotinfo_t*)dict_lookup(&s->members, &tmp);
-        if(m) {
-            return (memberinfo_t*)m;
-        }
+	if(!is_static) {
+	    m = (slotinfo_t*)dict_lookup(&s->members, &tmp);
+	    if(m) return (memberinfo_t*)m;
+	}
+	m = (slotinfo_t*)dict_lookup(&s->static_members, &tmp);
+	if(m) return (memberinfo_t*)m;
+
         s = s->superclass;
     }
     /* look at interfaces, and parent interfaces */
@@ -279,10 +350,13 @@ memberinfo_t* registry_findmember(classinfo_t*cls, const char*ns, const char*nam
         classinfo_t*s = cls->interfaces[t];
         if(s->kind != INFOTYPE_UNRESOLVED) {
             while(s) {
-                m = (slotinfo_t*)dict_lookup(&s->members, &tmp);
-                if(m) {
-                    return (memberinfo_t*)m;
-                }
+		if(!is_static) {
+		    m = (slotinfo_t*)dict_lookup(&s->members, &tmp);
+		    if(m) return (memberinfo_t*)m;
+		}
+		m = (slotinfo_t*)dict_lookup(&s->static_members, &tmp);
+		if(m) return (memberinfo_t*)m;
+
                 s = s->superclass;
             }
         }
@@ -291,20 +365,20 @@ memberinfo_t* registry_findmember(classinfo_t*cls, const char*ns, const char*nam
     return 0;
 }
 
-memberinfo_t* registry_findmember_nsset(classinfo_t*cls, namespace_list_t*ns, const char*name, char superclasses)
+memberinfo_t* registry_findmember_nsset(classinfo_t*cls, namespace_list_t*ns, const char*name, char superclasses, char is_static)
 {
     memberinfo_t*m = 0;
     while(ns) {
-        m = registry_findmember(cls, ns->namespace->name, name, superclasses);
+        m = registry_findmember(cls, ns->namespace->name, name, superclasses, is_static);
         if(m) return m;
         ns = ns->next;
     }
-    m = registry_findmember(cls, "", name, superclasses);
+    m = registry_findmember(cls, "", name, superclasses, is_static);
     if(m) return m;
     /* TODO: it maybe would be faster to just store the builtin namespace as "" in
              builtins.c (update: some members (e.g. XML.length) are present both for
             "" and "http:...builtin") */
-    m = registry_findmember(cls, "http://adobe.com/AS3/2006/builtin", name, superclasses);
+    m = registry_findmember(cls, "http://adobe.com/AS3/2006/builtin", name, superclasses, is_static);
     if(m) return m;
     return 0;
 }
@@ -358,6 +432,7 @@ classinfo_t* slotinfo_asclass(slotinfo_t*f) {
     }
     
     dict_init2(&c->members, &memberinfo_type, 1);
+    dict_init2(&c->static_members, &memberinfo_type, 1);
     c->data = f;
     dict_put(functionobjects, f, c);
     return c;
@@ -379,7 +454,7 @@ classinfo_t* slotinfo_gettype(slotinfo_t*f)
 }
 
 // ----------------------- package handling ---------------------------
-char registry_ispackage(char*package)
+char registry_ispackage(const char*package)
 {
     /* crude approximation of "the real thing", but sufficient for now */
     return !strncmp(package, "flash", 5);
@@ -463,13 +538,13 @@ classinfo_t* registry_getMovieClip() {
 
 // ----------------------- builtin dummy types -------------------------
 classinfo_t nullclass = {
-    INFOTYPE_CLASS,0,0,ACCESS_PACKAGE, "", "null", 0, 0, 0
+    INFOTYPE_CLASS,0,0,ACCESS_PACKAGE, "", "null", 0,0,0,0,0,0,0,0,0,0,0,0,0,
 };
 classinfo_t* registry_getnullclass() {
     return &nullclass;
 }
 classinfo_t voidclass = {
-    INFOTYPE_CLASS,0,0,ACCESS_PACKAGE, "", "void", 0, 0, 0
+    INFOTYPE_CLASS,0,0,ACCESS_PACKAGE, "", "void", 0,0,0,0,0,0,0,0,0,0,0,0,0,
 };
 classinfo_t* registry_getvoidclass() {
     return &voidclass;
@@ -485,6 +560,8 @@ namespace_t access2namespace(U8 access, char*package)
 
 char* infotypename(slotinfo_t*s)
 {
+    if(!s) 
+	return "(unknown)";
     if(s->kind == INFOTYPE_CLASS) return "class";
     else if(s->kind == INFOTYPE_VAR) return "var";
     else if(s->kind == INFOTYPE_METHOD) return "function";
