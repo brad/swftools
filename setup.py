@@ -1,7 +1,11 @@
 #!/usr/bin/env python
 
 from distutils import ccompiler
-from distutils.core import CompileError
+
+try:
+    from distutils.core import CompileError
+except ImportError:
+    from distutils.errors import CompileError
 
 try:
     from setuptools import setup, Extension
